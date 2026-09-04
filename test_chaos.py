@@ -1032,13 +1032,68 @@ class TestFindGoalLineFumbleCandidates:
 # print_candidates
 # ---------------------------------------------------------------------------
 
+class TestFindOnePointSafeties:
+
+    def _pbp(self, rows):
+        cols = [
+            "safety", "extra_point_attempt", "two_point_attempt",
+            "posteam", "defteam",
+            "game_id", "play_id", "qtr", "time", "away_team", "home_team", "desc",
+        ]
+        base = {
+            "safety": 0, "extra_point_attempt": 0, "two_point_attempt": 0,
+            "posteam": "A", "defteam": "B",
+            "game_id": "g", "play_id": 1, "qtr": 3, "time": "5:00",
+            "away_team": "B", "home_team": "A", "desc": "play",
+        }
+        return pd.DataFrame([{**base, **r} for r in rows], columns=cols)
+
+    def test_safety_on_extra_point_flagged(self):
+        pbp = self._pbp([
+            {"safety": 1, "extra_point_attempt": 1},
+        ])
+        assert len(chaos.find_one_point_safeties(pbp)) == 1
+
+    def test_safety_on_two_point_attempt_flagged(self):
+        pbp = self._pbp([
+            {"safety": 1, "two_point_attempt": 1},
+        ])
+        assert len(chaos.find_one_point_safeties(pbp)) == 1
+
+    def test_normal_safety_not_flagged(self):
+        # a regular (2-point) safety on a scrimmage play is not a 1-pt safety.
+        pbp = self._pbp([
+            {"safety": 1, "extra_point_attempt": 0, "two_point_attempt": 0},
+        ])
+        assert chaos.find_one_point_safeties(pbp) == []
+
+    def test_conversion_without_safety_not_flagged(self):
+        pbp = self._pbp([
+            {"safety": 0, "extra_point_attempt": 1},
+        ])
+        assert chaos.find_one_point_safeties(pbp) == []
+
+
 class TestPrintCandidates:
 
     def test_empty_message(self, capsys):
         chaos.print_candidates([], [], {1: "Team One"})
         out = capsys.readouterr().out
         assert "NOT SCORED" in out
-        assert "No ejection or goal-line-celebration" in out
+        assert "No ejection, goal-line-celebration fumble, or" in out
+
+    def test_one_point_safety_flagged_but_not_scored(self, capsys):
+        safeties = [{
+            "posteam": "A", "defteam": "B", "play_id": 1, "qtr": 4,
+            "time": "0:10", "away_team": "B", "home_team": "A",
+            "desc": "ONE-POINT SAFETY",
+        }]
+        chaos.print_candidates([], [], {1: "Team One"},
+                               one_point_safeties=safeties)
+        out = capsys.readouterr().out
+        assert "ONE-POINT SAFETY" in out
+        assert "1000" in out
+        assert "TOTAL CHAOS ADJUSTMENTS" not in out
 
     def test_fumble_candidate_printed_but_not_scored(self, capsys):
         fumbles = [{

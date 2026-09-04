@@ -55,6 +55,11 @@ PRESNAP_PENALTY_TYPES = {
 # own team. Applies on top of any base penalty points, for any penalty type.
 PENALTY_NEGATES_TD_POINTS = 10
 
+# One-point safety: a safety scored on a conversion attempt (extra point or
+# two-point try). Never happened in NFL history, but possible. Surfaced as a
+# review candidate for the commissioner to award — never auto-scored.
+ONE_POINT_SAFETY_POINTS = 1000
+
 # Only these positions are eligible for the +15 offensive tackle bonus.
 OFFENSIVE_POSITIONS = {
     "QB",
@@ -387,6 +392,12 @@ def load_pbp(season, week):
         "penalty",
         "penalty_type",
         "penalty_player_id",
+
+        "safety",
+        "extra_point_attempt",
+        "two_point_attempt",
+        "posteam",
+        "defteam",
 
         "solo_tackle_1_player_id",
         "solo_tackle_2_player_id",
@@ -1146,6 +1157,37 @@ def find_invalid_roster_spots(
 # Review candidates (flagged for the commissioner, never auto-scored)
 # =============================================================================
 
+def find_one_point_safeties(pbp):
+    """
+    +1000 (Rule): a one-point safety — a safety on an extra-point or two-point
+    conversion attempt. It has never happened in NFL history, but it is
+    possible. This is a team-level, momentous event, so it is surfaced for the
+    commissioner to award (+1000) rather than auto-scored.
+
+    Returns:
+        list of play contexts (with posteam/defteam)
+    """
+
+    plays = pbp[
+        (pbp["safety"] == 1)
+        & (
+            (pbp["extra_point_attempt"] == 1)
+            | (pbp["two_point_attempt"] == 1)
+        )
+    ]
+
+    results = []
+
+    for _, play in plays.iterrows():
+        results.append({
+            **play_context(play),
+            "posteam": play.get("posteam"),
+            "defteam": play.get("defteam"),
+        })
+
+    return results
+
+
 def find_ejection_candidates(pbp, starters):
     """
     Rule #4 (+20): player ejected from the game.
@@ -1837,12 +1879,14 @@ def print_report(
     print()
 
 
-def print_candidates(ejections, fumbles, team_names):
+def print_candidates(ejections, fumbles, team_names, one_point_safeties=None):
     """
     Print review-only candidates for rules that can't be scored
     automatically. These are NEVER added to any total — the commissioner
     confirms and applies points manually.
     """
+
+    one_point_safeties = one_point_safeties or []
 
     print()
     print("=" * 80)
@@ -1852,11 +1896,11 @@ def print_candidates(ejections, fumbles, team_names):
     )
     print("=" * 80)
 
-    if not ejections and not fumbles:
+    if not ejections and not fumbles and not one_point_safeties:
         print()
         print(
-            "No ejection or goal-line-celebration "
-            "fumble candidates found."
+            "No ejection, goal-line-celebration fumble, or "
+            "one-point-safety candidates found."
         )
         print()
         return
@@ -1914,6 +1958,24 @@ def print_candidates(ejections, fumbles, team_names):
             )
             print(
                 f"    Play {safe_play_id(candidate.get('play_id'))}"
+            )
+            print(f'    "{description}"')
+
+    if one_point_safeties:
+        print()
+        print(
+            f"POSSIBLE ONE-POINT SAFETY "
+            f"(+{ONE_POINT_SAFETY_POINTS} — commissioner assigns to the "
+            f"scoring defense):"
+        )
+
+        for candidate in one_point_safeties:
+            matchup, clock, description = format_play(candidate)
+
+            print()
+            print(
+                f"    {matchup} — {clock}  "
+                f"Play {safe_play_id(candidate.get('play_id'))}"
             )
             print(f'    "{description}"')
 
@@ -2191,10 +2253,13 @@ def main():
             starters,
         )
 
+        one_point_safeties = find_one_point_safeties(pbp)
+
         print_candidates(
             ejections,
             fumbles,
             team_names,
+            one_point_safeties,
         )
 
 
