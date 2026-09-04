@@ -38,6 +38,9 @@ No action needed. Calculated from official data every Wednesday.
 | **Offensive Tackle** | **+15** | A started offensive player (QB/RB/FB/WR/TE) records a tackle (solo or assist). Defensive tackles never count. |
 | **Dropped Pass** | **+5** | A started player is charted with a drop (FTN charting). |
 | **Red Zone Turnover** | **+5** | Every started player involved in a turnover inside the opponent's 20-yard line — the player who committed it (QB on an interception, or the fumbler) **and** any started defender who caused it (interceptor, fumble forcer, fumble recoverer). |
+| **Non-QB TD Pass** | **+20** | A started non-QB (RB/WR/TE/FB) throws a touchdown pass (trick play). |
+| **Taunting / Unsportsmanlike** | **+15** | A started player is flagged for taunting or unsportsmanlike conduct. |
+| **Pre-Snap Penalty** | **+5** | A started player commits a pre-snap penalty (false start, delay of game, illegal formation/shift/motion). |
 | **Invalid Roster Spot** | **−15** | A started offensive skill player who played **< 15% of offensive snaps AND had zero touches** (a wasted lineup slot). See exemptions below. |
 
 ### Invalid Roster Spot — exemptions
@@ -125,7 +128,7 @@ or losing) · suspension · planned QB packages · rotational substitutions.
 
 ## TL;DR
 
-- **Automatic every Wednesday:** offensive tackles (+15), drops (+5), red-zone turnovers (+5 to everyone involved), invalid spots (−15, injuries auto-exempt).
+- **Automatic every Wednesday:** offensive tackles (+15), drops (+5), red-zone turnovers (+5 to everyone involved), non-QB TD passes (+20), taunting/unsportsmanlike (+15), pre-snap penalties (+5), invalid spots (−15, injuries auto-exempt).
 - **Script flags, you confirm:** ejections (+20), goal-line celebration fumbles (+35).
 - **You report:** arrests, suspensions, cuts, gambling (Pete Rose), voluntary meltdowns (Antonio Brown), benchings (+20), and chaotic-event votes.
 - **Ping the commissioner** for anything manual. Records update if outcomes change. Chaos! 🔥
@@ -170,8 +173,9 @@ pandas/numpy, so the installer handles that; see `requirements.txt`.)
 
 ### What is and isn't automated
 
-- **Scored automatically:** offensive tackles, drops, red-zone turnovers, and
-  invalid roster spots (with injury auto-exemption).
+- **Scored automatically:** offensive tackles, drops, red-zone turnovers, non-QB
+  TD passes, taunting/unsportsmanlike and pre-snap penalties, and invalid roster
+  spots (with injury auto-exemption).
 - **Flagged for review:** ejections, premature goal-line fumbles.
 - **Entirely manual:** arrests, league suspensions, cuts, the Pete Rose Award,
   the Antonio Brown Rule, benchings, and chaotic-event votes — these require

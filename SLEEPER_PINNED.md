@@ -28,6 +28,11 @@ Calculated from official NFL data every Wednesday:
 - **+5 Red Zone Turnover** — every started player involved in a turnover inside
   the opponent's 20: the one who committed it (QB's INT or the fumbler) **and**
   any started defender who caused it (interception, forced fumble, recovery).
+- **+20 Non-QB TD Pass** — a started non-QB (RB/WR/TE) throws a touchdown pass.
+- **+15 Taunting / Unsportsmanlike** — a started player is flagged for taunting
+  or unsportsmanlike conduct.
+- **+5 Pre-Snap Penalty** — a started player's false start, delay of game, or
+  illegal formation/shift/motion.
 - **−15 Invalid Roster Spot** — a started offensive skill player with **< 15% of
   snaps AND zero touches** (a wasted slot).
 
