@@ -85,6 +85,7 @@ records are updated.
 | **Suspended by the league** | **+25** | Applied to the player's **previous game**. |
 | **Cut after their game** | **+30** | Your starter is released following that weekend's games. |
 | **The Antonio Brown Rule** | **+25** | Player leaves the game **voluntarily** due to a meltdown. |
+| **Celebration Self-Injury** | **+15** | Your player injures himself while celebrating. |
 
 ### 🎰 The Pete Rose Award (gambling)
 

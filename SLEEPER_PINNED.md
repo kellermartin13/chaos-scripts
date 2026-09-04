@@ -70,6 +70,7 @@ apply it after the week is final (records update if outcomes change):
 - **+25 Suspended by the league** — applied to the player's previous game.
 - **+30 Cut after their game** — your starter is released that weekend.
 - **+25 The Antonio Brown Rule** — player leaves the game voluntarily due to a meltdown.
+- **+15 Celebration Self-Injury** — your player injures himself while celebrating.
 - **+20 Chaotic Event** — anything extraordinary not covered elsewhere. Requires a
   majority league vote.
 
