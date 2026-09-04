@@ -49,6 +49,7 @@ PRESNAP_PENALTY_TYPES = {
     "Illegal Formation",
     "Illegal Shift",
     "Illegal Motion",
+    "Offensive Offside",
 }
 
 # Extra bonus when a started player's penalty wipes out a touchdown for his

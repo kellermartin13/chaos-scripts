@@ -698,6 +698,12 @@ class TestFindPenalties:
         ])
         assert chaos.find_penalties(pbp, starters)["00-1"]["points"] == 5
 
+    def test_offensive_offside_is_presnap(self, starters):
+        pbp = self._pbp([
+            {"penalty_type": "Offensive Offside", "penalty_player_id": "00-1"},
+        ])
+        assert chaos.find_penalties(pbp, starters)["00-1"]["points"] == 5
+
     def test_other_penalty_ignored(self, starters):
         pbp = self._pbp([
             {"penalty_type": "Offensive Holding", "penalty_player_id": "00-1"},
