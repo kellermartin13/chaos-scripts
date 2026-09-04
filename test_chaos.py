@@ -471,18 +471,33 @@ class TestFindInvalidRosterSpots:
 # find_redzone_turnovers
 # ---------------------------------------------------------------------------
 
+class TestRedzoneLosText:
+
+    def test_uses_yrdln_string(self):
+        assert chaos.redzone_los_text({"yrdln": "KC 18"}) == "KC 18"
+
+    def test_falls_back_to_yardline_100(self):
+        assert chaos.redzone_los_text(
+            {"yrdln": None, "yardline_100": 12}
+        ) == "opponent's 12-yard line"
+
+    def test_generic_when_nothing_available(self):
+        assert chaos.redzone_los_text({}) == "the red zone"
+
+
 class TestFindRedzoneTurnovers:
 
     def _pbp(self, rows):
         cols = [
-            "yardline_100", "interception", "fumble_lost",
+            "yardline_100", "yrdln", "interception", "fumble_lost",
             "passer_player_id", "fumbled_1_player_id",
             "interception_player_id", "forced_fumble_player_1_player_id",
             "fumble_recovery_1_player_id",
             "game_id", "play_id", "qtr", "time", "away_team", "home_team", "desc",
         ]
         base = {
-            "yardline_100": 10, "interception": 0, "fumble_lost": 0,
+            "yardline_100": 10, "yrdln": "KC 10", "interception": 0,
+            "fumble_lost": 0,
             "passer_player_id": None, "fumbled_1_player_id": None,
             "interception_player_id": None,
             "forced_fumble_player_1_player_id": None,
@@ -495,10 +510,12 @@ class TestFindRedzoneTurnovers:
     def test_interception_committer_awarded(self):
         starters = {"00-qb": {"name": "QB", "position": "QB", "roster_id": 1}}
         pbp = self._pbp([
-            {"yardline_100": 5, "interception": 1, "passer_player_id": "00-qb"},
+            {"yardline_100": 5, "yrdln": "KC 5", "interception": 1,
+             "passer_player_id": "00-qb"},
         ])
         result = chaos.find_redzone_turnovers(pbp, starters)
         assert result["00-qb"]["count"] == 1
+        assert result["00-qb"]["plays"][0]["yrdln"] == "KC 5"
 
     def test_interceptor_idp_awarded(self):
         starters = {"00-db": {"name": "DB", "position": "CB", "roster_id": 2}}
@@ -656,6 +673,7 @@ class TestPrintReport:
                 "count": 1,
                 "plays": [{
                     "role": "committed turnover (interception thrown)",
+                    "yrdln": "KC 18", "yardline_100": 18,
                     "game_id": "g", "play_id": 1, "qtr": 2, "time": "1:00",
                     "away_team": "B", "home_team": "A", "desc": "INT",
                 }],
@@ -665,6 +683,7 @@ class TestPrintReport:
                            redzone=redzone, count_assists=True)
         out = capsys.readouterr().out
         assert "RED ZONE TURNOVER" in out
+        assert "Line of scrimmage: KC 18 (red zone)" in out
         assert "TOTAL ADJUSTMENT: +5" in out
 
     def test_invalid_offsets_tackle_but_still_shown(

@@ -353,6 +353,7 @@ def load_pbp(season, week):
 
         "interception",
         "fumble_lost",
+        "yrdln",
         "passer_player_id",
         "interception_player_id",
         "forced_fumble_player_1_player_id",
@@ -757,6 +758,8 @@ def find_redzone_turnovers(pbp, starters):
             result[player_id]["plays"].append({
                 **context,
                 "role": " + ".join(player_roles),
+                "yrdln": play.get("yrdln"),
+                "yardline_100": play.get("yardline_100"),
             })
 
     return result
@@ -1212,6 +1215,25 @@ def format_play(play):
     )
 
 
+def redzone_los_text(play):
+    """
+    Human-readable line of scrimmage for a red-zone turnover play, e.g.
+    "KC 18". Falls back to distance-to-goal, then a generic label.
+    """
+
+    yrdln = play.get("yrdln")
+
+    if isinstance(yrdln, str) and yrdln.strip():
+        return yrdln.strip()
+
+    yardline = play.get("yardline_100")
+
+    if yardline is not None and not pd.isna(yardline):
+        return f"opponent's {int(yardline)}-yard line"
+
+    return "the red zone"
+
+
 def print_report(
     week,
     starters,
@@ -1485,6 +1507,11 @@ def print_report(
 
             print(
                 f"    {matchup} — {clock}"
+            )
+
+            print(
+                f"    Line of scrimmage: "
+                f"{redzone_los_text(play)} (red zone)"
             )
 
             print(
