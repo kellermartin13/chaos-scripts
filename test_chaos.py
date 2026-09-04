@@ -238,11 +238,14 @@ class TestFindOffensiveTackles:
         cols = [
             "game_id", "play_id", "qtr", "time",
             "home_team", "away_team", "desc", "special",
+            "interception", "fumble_lost",
             "solo_tackle_1_player_id", "solo_tackle_2_player_id",
             "assist_tackle_1_player_id", "assist_tackle_2_player_id",
             "assist_tackle_3_player_id", "assist_tackle_4_player_id",
         ]
-        return pd.DataFrame(rows, columns=cols)
+        # default: a turnover play (interception) so tackles are eligible.
+        base = {"special": 0, "interception": 1, "fumble_lost": 0}
+        return pd.DataFrame([{**base, **r} for r in rows], columns=cols)
 
     def test_offensive_starter_solo_and_assist_counted(self, starters):
         pbp = self._pbp([
@@ -270,8 +273,26 @@ class TestFindOffensiveTackles:
     def test_special_teams_tackle_excluded(self, starters):
         # a WR gunner making a punt-coverage tackle must NOT get the bonus.
         pbp = self._pbp([
-            {"game_id": "g", "play_id": 1, "special": 1,
+            {"game_id": "g", "play_id": 1, "special": 1, "interception": 1,
              "assist_tackle_1_player_id": "00-2"},
+        ])
+        result = chaos.find_offensive_tackles(pbp, starters)
+        assert "00-2" not in result
+
+    def test_lost_fumble_turnover_counts(self, starters):
+        pbp = self._pbp([
+            {"game_id": "g", "play_id": 1, "interception": 0, "fumble_lost": 1,
+             "solo_tackle_1_player_id": "00-2"},
+        ])
+        result = chaos.find_offensive_tackles(pbp, starters)
+        assert result["00-2"]["solo"] == 1
+
+    def test_two_way_player_defensive_tackle_excluded(self, starters):
+        # No turnover on the play -> a Sleeper-"offensive" player credited
+        # with a tackle was actually on defense (Travis Hunter at CB).
+        pbp = self._pbp([
+            {"game_id": "g", "play_id": 1, "interception": 0, "fumble_lost": 0,
+             "solo_tackle_1_player_id": "00-2"},
         ])
         result = chaos.find_offensive_tackles(pbp, starters)
         assert "00-2" not in result

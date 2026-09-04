@@ -444,6 +444,19 @@ def find_offensive_tackles(pbp, starters):
         if play.get("special") == 1:
             continue
 
+        # An offensive player only legitimately records a tackle after his
+        # team turns the ball over and he tackles the returner. On any other
+        # play, an "offensive-position" starter credited with a tackle was
+        # actually playing defense (two-way players like Travis Hunter at CB),
+        # so require a change of possession (interception or lost fumble).
+        turnover = (
+            play.get("interception") == 1
+            or play.get("fumble_lost") == 1
+        )
+
+        if not turnover:
+            continue
+
         context = play_context(play)
 
         #
