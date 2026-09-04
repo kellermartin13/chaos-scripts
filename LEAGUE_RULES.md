@@ -41,6 +41,7 @@ No action needed. Calculated from official data every Wednesday.
 | **Non-QB TD Pass** | **+20** | A started non-QB (RB/WR/TE/FB) throws a touchdown pass (trick play). |
 | **Taunting / Unsportsmanlike** | **+15** | A started player is flagged for taunting or unsportsmanlike conduct. |
 | **Pre-Snap Penalty** | **+5** | A started player commits a pre-snap penalty (false start, delay of game, illegal formation/shift/motion). |
+| **Penalty Negates a TD** | **+10** | A started player's penalty (any type) wipes out a touchdown for their own team. Stacks on top of the taunting/pre-snap bonus. |
 | **Invalid Roster Spot** | **−15** | A started offensive skill player who played **< 15% of offensive snaps AND had zero touches** (a wasted lineup slot). See exemptions below. |
 
 ### Invalid Roster Spot — exemptions
@@ -72,6 +73,7 @@ them, but a human has to confirm. If you think you qualify, ping the commissione
 |------|--------|---------|
 | **Ejection** | **+20** | Your started player is ejected/disqualified from the game. |
 | **Premature Celebration Fumble** | **+35** | Your player drops the ball *before* crossing the goal line in celebration. **Forced fumbles do not count** — only the pure idiocy of not finishing the play. |
+| **One-Point Safety** | **+1000** | A safety scored on a conversion attempt (extra point or two-point try). Has never happened in NFL history, but it's possible. The script flags it; the commissioner awards it to the scoring defense. |
 
 ---
 
@@ -131,8 +133,8 @@ or losing) · suspension · planned QB packages · rotational substitutions.
 
 ## TL;DR
 
-- **Automatic every Wednesday:** offensive tackles (+15), drops (+5), red-zone turnovers (+5 to everyone involved), non-QB TD passes (+20), taunting/unsportsmanlike (+15), pre-snap penalties (+5), invalid spots (−15, in-game injuries auto-exempt).
-- **Script flags, you confirm:** ejections (+20), goal-line celebration fumbles (+35).
+- **Automatic every Wednesday:** offensive tackles (+15), drops (+5), red-zone turnovers (+5 to everyone involved), non-QB TD passes (+20), taunting/unsportsmanlike (+15), pre-snap penalties (+5), penalties that negate a TD (+10), invalid spots (−15, in-game injuries auto-exempt).
+- **Script flags, you confirm:** ejections (+20), goal-line celebration fumbles (+35), one-point safeties (+1000).
 - **You report:** arrests, suspensions, cuts, gambling (Pete Rose), voluntary meltdowns (Antonio Brown), benchings (+20), and chaotic-event votes.
 - **Ping the commissioner** for anything manual. Records update if outcomes change. Chaos! 🔥
 
@@ -177,9 +179,10 @@ pandas/numpy, so the installer handles that; see `requirements.txt`.)
 ### What is and isn't automated
 
 - **Scored automatically:** offensive tackles, drops, red-zone turnovers, non-QB
-  TD passes, taunting/unsportsmanlike and pre-snap penalties, and invalid roster
-  spots (with injury auto-exemption).
-- **Flagged for review:** ejections, premature goal-line fumbles.
+  TD passes, taunting/unsportsmanlike and pre-snap penalties, penalties that
+  negate a touchdown, and invalid roster spots (with injury auto-exemption).
+- **Flagged for review:** ejections, premature goal-line fumbles, one-point
+  safeties.
 - **Entirely manual:** arrests, league suspensions, cuts, the Pete Rose Award,
   the Antonio Brown Rule, benchings, and chaotic-event votes — these require
   news or judgment the data can't provide.

@@ -32,7 +32,9 @@ Calculated from official NFL data every Wednesday:
 - **+15 Taunting / Unsportsmanlike** — a started player is flagged for taunting
   or unsportsmanlike conduct.
 - **+5 Pre-Snap Penalty** — a started player's false start, delay of game, or
-  illegal formation/shift/motion.
+  illegal formation/shift/motion/offside.
+- **+10 Penalty Negates a TD** — a started player's penalty (any type) wipes out
+  a touchdown for their own team. Stacks with the penalty bonuses above.
 - **−15 Invalid Roster Spot** — a started offensive skill player with **< 15% of
   snaps AND zero touches** (a wasted slot).
 
@@ -65,6 +67,9 @@ The script surfaces these each week, but I confirm them. Ping me if you qualify:
 - **+35 Premature Celebration Fumble** — dropping the ball *before* crossing the
   goal line in celebration. **Forced fumbles don't count** — only the idiocy of
   not finishing the play.
+- **+1000 One-Point Safety** — a safety on a conversion attempt (extra point or
+  two-point try). Never happened in NFL history, but possible. Awarded to the
+  scoring defense.
 
 ---
 
