@@ -721,6 +721,32 @@ class TestFindPenalties:
         assert result["00-1"]["count"] == 2
         assert result["00-1"]["points"] == 20
 
+    def test_td_negating_holding_worth_10(self, starters):
+        # a non-taunting/non-pre-snap penalty that nullifies a TD is +10.
+        pbp = self._pbp([
+            {"penalty_type": "Offensive Holding", "penalty_player_id": "00-1",
+             "desc": "23-K.Williams for 2 yards, TOUCHDOWN NULLIFIED by "
+                     "Penalty. PENALTY on A, Offensive Holding."},
+        ])
+        result = chaos.find_penalties(pbp, starters)
+        assert result["00-1"]["points"] == 10
+        assert result["00-1"]["plays"][0]["negated_td"] is True
+
+    def test_td_negating_taunting_stacks_to_25(self, starters):
+        pbp = self._pbp([
+            {"penalty_type": "Taunting", "penalty_player_id": "00-1",
+             "desc": "pass TOUCHDOWN NULLIFIED by Penalty. PENALTY, Taunting."},
+        ])
+        assert chaos.find_penalties(pbp, starters)["00-1"]["points"] == 25
+
+    def test_td_negating_presnap_stacks_to_15(self, starters):
+        pbp = self._pbp([
+            {"penalty_type": "Illegal Shift", "penalty_player_id": "00-1",
+             "desc": "run TOUCHDOWN NULLIFIED by Penalty. PENALTY, Illegal "
+                     "Shift."},
+        ])
+        assert chaos.find_penalties(pbp, starters)["00-1"]["points"] == 15
+
 
 # ---------------------------------------------------------------------------
 # print_report (scoring math + commissioner totals)

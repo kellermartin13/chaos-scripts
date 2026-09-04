@@ -51,6 +51,10 @@ PRESNAP_PENALTY_TYPES = {
     "Illegal Motion",
 }
 
+# Extra bonus when a started player's penalty wipes out a touchdown for his
+# own team. Applies on top of any base penalty points, for any penalty type.
+PENALTY_NEGATES_TD_POINTS = 10
+
 # Only these positions are eligible for the +15 offensive tackle bonus.
 OFFENSIVE_POSITIONS = {
     "QB",
@@ -852,10 +856,16 @@ def find_penalties(pbp, starters):
     """
     Penalty chaos for started players:
       +15 taunting / unsportsmanlike conduct,
-      +5  pre-snap penalties (false start, delay of game, etc.).
+      +5  pre-snap penalties (false start, delay of game, etc.),
+      +10 extra (any penalty type) when the penalty nullifies a touchdown for
+          the player's own team.
+
+    A TD is only "NULLIFIED by Penalty" when the scoring team commits the foul,
+    so the penalized player is always on the team that lost the TD.
 
     Returns:
-        gsis_id -> {count, points, plays: [{**context, penalty_type, points}]}
+        gsis_id -> {count, points, plays: [{**context, penalty_type, points,
+                    negated_td}]}
     """
 
     result = defaultdict(
@@ -877,18 +887,36 @@ def find_penalties(pbp, starters):
         penalty_type = play.get("penalty_type")
 
         if penalty_type in TAUNTING_PENALTY_TYPES:
-            points = TAUNTING_PENALTY_POINTS
+            base_points = TAUNTING_PENALTY_POINTS
         elif penalty_type in PRESNAP_PENALTY_TYPES:
-            points = PRESNAP_PENALTY_POINTS
+            base_points = PRESNAP_PENALTY_POINTS
         else:
+            base_points = 0
+
+        context = play_context(play)
+
+        negated_td = "TOUCHDOWN NULLIFIED" in str(
+            context.get("desc")
+        ).upper()
+
+        td_points = (
+            PENALTY_NEGATES_TD_POINTS
+            if negated_td
+            else 0
+        )
+
+        points = base_points + td_points
+
+        if points == 0:
             continue
 
         result[player_id]["count"] += 1
         result[player_id]["points"] += points
         result[player_id]["plays"].append({
-            **play_context(play),
+            **context,
             "penalty_type": penalty_type,
             "points": points,
+            "negated_td": negated_td,
         })
 
     return result
@@ -1686,9 +1714,13 @@ def print_report(
                 description,
             ) = format_play(play)
 
+            label = f"{str(play['penalty_type']).upper()} PENALTY"
+
+            if play.get("negated_td"):
+                label = f"{label} (NEGATED A TOUCHDOWN)"
+
             print(
-                f"  +{play['points']} "
-                f"{str(play['penalty_type']).upper()} PENALTY"
+                f"  +{play['points']} {label}"
             )
 
             print(
