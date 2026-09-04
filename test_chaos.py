@@ -608,6 +608,121 @@ class TestFindRedzoneTurnovers:
 
 
 # ---------------------------------------------------------------------------
+# find_non_qb_td_passes
+# ---------------------------------------------------------------------------
+
+class TestFindNonQbTdPasses:
+
+    @pytest.fixture
+    def starters(self):
+        return {
+            "00-wr": {"name": "WR Guy", "position": "WR", "roster_id": 1},
+            "00-qb": {"name": "QB Guy", "position": "QB", "roster_id": 1},
+        }
+
+    def _pbp(self, rows):
+        cols = [
+            "pass_touchdown", "passer_player_id",
+            "game_id", "play_id", "qtr", "time",
+            "away_team", "home_team", "desc",
+        ]
+        base = {
+            "game_id": "g", "play_id": 1, "qtr": 2, "time": "1:00",
+            "away_team": "B", "home_team": "A", "desc": "TD pass",
+        }
+        return pd.DataFrame([{**base, **r} for r in rows], columns=cols)
+
+    def test_non_qb_td_pass_awarded(self, starters):
+        pbp = self._pbp([
+            {"pass_touchdown": 1, "passer_player_id": "00-wr"},
+        ])
+        result = chaos.find_non_qb_td_passes(pbp, starters)
+        assert result["00-wr"]["count"] == 1
+
+    def test_qb_td_pass_not_awarded(self, starters):
+        pbp = self._pbp([
+            {"pass_touchdown": 1, "passer_player_id": "00-qb"},
+        ])
+        assert "00-qb" not in chaos.find_non_qb_td_passes(pbp, starters)
+
+    def test_non_starter_not_awarded(self, starters):
+        pbp = self._pbp([
+            {"pass_touchdown": 1, "passer_player_id": "00-other"},
+        ])
+        assert chaos.find_non_qb_td_passes(pbp, starters) == {}
+
+
+# ---------------------------------------------------------------------------
+# find_penalties
+# ---------------------------------------------------------------------------
+
+class TestFindPenalties:
+
+    @pytest.fixture
+    def starters(self):
+        return {
+            "00-1": {"name": "Player One", "position": "WR", "roster_id": 1},
+        }
+
+    def _pbp(self, rows):
+        cols = [
+            "penalty", "penalty_type", "penalty_player_id",
+            "game_id", "play_id", "qtr", "time",
+            "away_team", "home_team", "desc",
+        ]
+        base = {
+            "penalty": 1,
+            "game_id": "g", "play_id": 1, "qtr": 2, "time": "1:00",
+            "away_team": "B", "home_team": "A", "desc": "penalty",
+        }
+        return pd.DataFrame([{**base, **r} for r in rows], columns=cols)
+
+    def test_taunting_worth_15(self, starters):
+        pbp = self._pbp([
+            {"penalty_type": "Taunting", "penalty_player_id": "00-1"},
+        ])
+        result = chaos.find_penalties(pbp, starters)
+        assert result["00-1"]["points"] == 15
+        assert result["00-1"]["count"] == 1
+
+    def test_unsportsmanlike_worth_15(self, starters):
+        pbp = self._pbp([
+            {"penalty_type": "Unsportsmanlike Conduct",
+             "penalty_player_id": "00-1"},
+        ])
+        assert chaos.find_penalties(pbp, starters)["00-1"]["points"] == 15
+
+    def test_presnap_worth_5(self, starters):
+        pbp = self._pbp([
+            {"penalty_type": "False Start", "penalty_player_id": "00-1"},
+        ])
+        assert chaos.find_penalties(pbp, starters)["00-1"]["points"] == 5
+
+    def test_other_penalty_ignored(self, starters):
+        pbp = self._pbp([
+            {"penalty_type": "Offensive Holding", "penalty_player_id": "00-1"},
+        ])
+        assert chaos.find_penalties(pbp, starters) == {}
+
+    def test_penalty_by_non_starter_ignored(self, starters):
+        pbp = self._pbp([
+            {"penalty_type": "Taunting", "penalty_player_id": "00-other"},
+        ])
+        assert chaos.find_penalties(pbp, starters) == {}
+
+    def test_multiple_penalties_accumulate(self, starters):
+        pbp = self._pbp([
+            {"penalty_type": "Taunting", "penalty_player_id": "00-1",
+             "play_id": 1},
+            {"penalty_type": "False Start", "penalty_player_id": "00-1",
+             "play_id": 2},
+        ])
+        result = chaos.find_penalties(pbp, starters)
+        assert result["00-1"]["count"] == 2
+        assert result["00-1"]["points"] == 20
+
+
+# ---------------------------------------------------------------------------
 # print_report (scoring math + commissioner totals)
 # ---------------------------------------------------------------------------
 
@@ -715,6 +830,39 @@ class TestPrintReport:
         assert "RED ZONE TURNOVER" in out
         assert "Line of scrimmage: KC 18 (red zone)" in out
         assert "TOTAL ADJUSTMENT: +5" in out
+
+    def test_non_qb_td_pass_bonus(self, capsys, starters, team_names):
+        trick_tds = {
+            "00-2": {
+                "count": 1,
+                "plays": [{
+                    "game_id": "g", "play_id": 1, "qtr": 2, "time": "1:00",
+                    "away_team": "B", "home_team": "A", "desc": "WR TD pass",
+                }],
+            }
+        }
+        chaos.print_report(2, starters, team_names, {}, {},
+                           trick_tds=trick_tds, count_assists=True)
+        out = capsys.readouterr().out
+        assert "NON-QB TOUCHDOWN PASS" in out
+        assert "TOTAL ADJUSTMENT: +20" in out
+
+    def test_penalty_bonus(self, capsys, starters, team_names):
+        penalties = {
+            "00-2": {
+                "count": 1, "points": 15,
+                "plays": [{
+                    "penalty_type": "Taunting", "points": 15,
+                    "game_id": "g", "play_id": 1, "qtr": 2, "time": "1:00",
+                    "away_team": "B", "home_team": "A", "desc": "taunt",
+                }],
+            }
+        }
+        chaos.print_report(2, starters, team_names, {}, {},
+                           penalties=penalties, count_assists=True)
+        out = capsys.readouterr().out
+        assert "TAUNTING PENALTY" in out
+        assert "TOTAL ADJUSTMENT: +15" in out
 
     def test_invalid_offsets_tackle_but_still_shown(
         self, capsys, starters, team_names

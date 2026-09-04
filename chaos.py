@@ -32,6 +32,25 @@ INVALID_SNAP_THRESHOLD = 0.15
 REDZONE_TURNOVER_POINTS = 5
 REDZONE_YARDLINE = 20
 
+# Trick-play touchdown: a non-QB throws a TD pass.
+NON_QB_TD_PASS_POINTS = 20
+
+# Penalty chaos, keyed off nflverse penalty_type.
+TAUNTING_PENALTY_POINTS = 15
+TAUNTING_PENALTY_TYPES = {
+    "Taunting",
+    "Unsportsmanlike Conduct",
+}
+
+PRESNAP_PENALTY_POINTS = 5
+PRESNAP_PENALTY_TYPES = {
+    "False Start",
+    "Delay of Game",
+    "Illegal Formation",
+    "Illegal Shift",
+    "Illegal Motion",
+}
+
 # Only these positions are eligible for the +15 offensive tackle bonus.
 OFFENSIVE_POSITIONS = {
     "QB",
@@ -359,6 +378,11 @@ def load_pbp(season, week):
         "interception_player_id",
         "forced_fumble_player_1_player_id",
         "fumble_recovery_1_player_id",
+
+        "pass_touchdown",
+        "penalty",
+        "penalty_type",
+        "penalty_player_id",
 
         "solo_tackle_1_player_id",
         "solo_tackle_2_player_id",
@@ -781,6 +805,91 @@ def find_redzone_turnovers(pbp, starters):
                 "yrdln": play.get("yrdln"),
                 "yardline_100": play.get("yardline_100"),
             })
+
+    return result
+
+
+# =============================================================================
+# Trick plays & penalties
+# =============================================================================
+
+def find_non_qb_td_passes(pbp, starters):
+    """
+    +20 when a started non-QB throws a touchdown pass (trick play).
+
+    Returns:
+        gsis_id -> {count, plays}
+    """
+
+    result = defaultdict(
+        lambda: {
+            "count": 0,
+            "plays": [],
+        }
+    )
+
+    passes = pbp[
+        (pbp["pass_touchdown"] == 1)
+        & (pbp["passer_player_id"].notna())
+    ]
+
+    for _, play in passes.iterrows():
+        passer_id = play.get("passer_player_id")
+
+        if passer_id not in starters:
+            continue
+
+        if starters[passer_id]["position"] == "QB":
+            continue
+
+        result[passer_id]["count"] += 1
+        result[passer_id]["plays"].append(play_context(play))
+
+    return result
+
+
+def find_penalties(pbp, starters):
+    """
+    Penalty chaos for started players:
+      +15 taunting / unsportsmanlike conduct,
+      +5  pre-snap penalties (false start, delay of game, etc.).
+
+    Returns:
+        gsis_id -> {count, points, plays: [{**context, penalty_type, points}]}
+    """
+
+    result = defaultdict(
+        lambda: {
+            "count": 0,
+            "points": 0,
+            "plays": [],
+        }
+    )
+
+    penalties = pbp[pbp["penalty"] == 1]
+
+    for _, play in penalties.iterrows():
+        player_id = play.get("penalty_player_id")
+
+        if pd.isna(player_id) or player_id not in starters:
+            continue
+
+        penalty_type = play.get("penalty_type")
+
+        if penalty_type in TAUNTING_PENALTY_TYPES:
+            points = TAUNTING_PENALTY_POINTS
+        elif penalty_type in PRESNAP_PENALTY_TYPES:
+            points = PRESNAP_PENALTY_POINTS
+        else:
+            continue
+
+        result[player_id]["count"] += 1
+        result[player_id]["points"] += points
+        result[player_id]["plays"].append({
+            **play_context(play),
+            "penalty_type": penalty_type,
+            "points": points,
+        })
 
     return result
 
@@ -1263,6 +1372,8 @@ def print_report(
     invalid=None,
     exempt=None,
     redzone=None,
+    trick_tds=None,
+    penalties=None,
     count_assists=True,
 ):
     """
@@ -1275,6 +1386,8 @@ def print_report(
     invalid = invalid or {}
     exempt = exempt or {}
     redzone = redzone or {}
+    trick_tds = trick_tds or {}
+    penalties = penalties or {}
 
     adjustments = defaultdict(int)
 
@@ -1313,6 +1426,8 @@ def print_report(
         | set(drops.keys())
         | set(invalid.keys())
         | set(redzone.keys())
+        | set(trick_tds.keys())
+        | set(penalties.keys())
     )
 
     print()
@@ -1373,6 +1488,23 @@ def print_report(
             },
         )
 
+        trick_data = trick_tds.get(
+            gsis_id,
+            {
+                "count": 0,
+                "plays": [],
+            },
+        )
+
+        penalty_data = penalties.get(
+            gsis_id,
+            {
+                "count": 0,
+                "points": 0,
+                "plays": [],
+            },
+        )
+
         solo = tackle_data["solo"]
         assists = tackle_data["assists"]
         drop_count = drop_data["count"]
@@ -1400,6 +1532,15 @@ def print_report(
             * REDZONE_TURNOVER_POINTS
         )
 
+        trick_count = trick_data["count"]
+
+        trick_bonus = (
+            trick_count
+            * NON_QB_TD_PASS_POINTS
+        )
+
+        penalty_bonus = penalty_data["points"]
+
         invalid_data = invalid.get(gsis_id)
 
         invalid_penalty = (
@@ -1412,6 +1553,8 @@ def print_report(
             tackle_bonus
             + drop_bonus
             + redzone_bonus
+            + trick_bonus
+            + penalty_bonus
             - invalid_penalty
         )
 
@@ -1419,6 +1562,8 @@ def print_report(
             tackle_bonus == 0
             and drop_bonus == 0
             and redzone_bonus == 0
+            and trick_bonus == 0
+            and penalty_bonus == 0
             and not invalid_data
         ):
             continue
@@ -1546,6 +1691,67 @@ def print_report(
             print()
 
         #
+        # Non-QB touchdown passes
+        #
+
+        for play in trick_data["plays"]:
+            (
+                matchup,
+                clock,
+                description,
+            ) = format_play(play)
+
+            print(
+                f"  +{NON_QB_TD_PASS_POINTS} NON-QB TOUCHDOWN PASS"
+            )
+
+            print(
+                f"    {matchup} — {clock}"
+            )
+
+            print(
+                f"    Play "
+                f"{safe_play_id(play.get('play_id'))}"
+            )
+
+            print(
+                f'    "{description}"'
+            )
+
+            print()
+
+        #
+        # Penalties
+        #
+
+        for play in penalty_data["plays"]:
+            (
+                matchup,
+                clock,
+                description,
+            ) = format_play(play)
+
+            print(
+                f"  +{play['points']} "
+                f"{str(play['penalty_type']).upper()} PENALTY"
+            )
+
+            print(
+                f"    {matchup} — {clock}"
+            )
+
+            print(
+                f"    Play "
+                f"{safe_play_id(play.get('play_id'))}"
+            )
+
+            print(
+                f'    "{description}"'
+            )
+
+            print()
+
+        #
         # Invalid roster spot
         #
 
@@ -1578,6 +1784,14 @@ def print_report(
 
         print(
             f"  RED ZONE TURNOVERS: {redzone_count}"
+        )
+
+        print(
+            f"  NON-QB TD PASSES: {trick_count}"
+        )
+
+        print(
+            f"  PENALTIES: {penalty_data['count']}"
         )
 
         if invalid_data:
@@ -1907,6 +2121,16 @@ def main():
         starters,
     )
 
+    trick_tds = find_non_qb_td_passes(
+        pbp,
+        starters,
+    )
+
+    penalties = find_penalties(
+        pbp,
+        starters,
+    )
+
     #
     # Invalid roster spots (snap share + touches)
     #
@@ -1961,6 +2185,8 @@ def main():
         invalid=invalid,
         exempt=exempted,
         redzone=redzone,
+        trick_tds=trick_tds,
+        penalties=penalties,
         count_assists=(
             not args.solo_tackles_only
         ),
