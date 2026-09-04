@@ -1,0 +1,14 @@
+# Python virtualenv
+.venv/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Microsoft Office temp lock files (e.g. ~$LEAGUE_RULES.docx)
+~$*

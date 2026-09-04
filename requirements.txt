@@ -1,0 +1,16 @@
+# chaos.py dependencies (Python 3.12)
+#
+# NOTE: nfl_data_py is NOT listed here. Its 0.3.3 release hard-pins
+# pandas<2 / numpy<2, which have no py3.12 wheels and fail to build from
+# source. Those pins also conflict with any pandas that does have a wheel,
+# so `pip install -r requirements.txt` can't resolve it.
+#
+# Use ./install.sh (installs these, then nfl_data_py with --no-deps), or:
+#   pip install -r requirements.txt
+#   pip install --no-deps nfl_data_py==0.3.3
+#
+numpy==1.26.4
+pandas==2.2.3
+requests==2.34.2
+appdirs==1.4.4
+fastparquet==2026.5.0
