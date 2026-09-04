@@ -47,8 +47,11 @@ No action needed. Calculated from official data every Wednesday.
 
 The penalty targets *unavailable* players, not unlucky ones:
 
-- **Injured players are auto-exempt.** Anyone ruled **Out or Doubtful** on the
-  week's injury report (or hurt in-game) is excluded automatically — no penalty.
+- **Players hurt during the game are auto-exempt.** If a player is injured
+  in-game (per the play-by-play), the wasted spot isn't his manager's fault.
+- **A player ruled out before kickoff is NOT exempt.** That was known
+  information, so starting an inactive player is exactly the invalid roster
+  spot this rule penalizes.
 - **Benched players are exempt too**, but the commissioner enters those by hand
   (see the Benching rule). Since a benching is a **+20 reward**, it is never also
   a −15 penalty.
@@ -128,7 +131,7 @@ or losing) · suspension · planned QB packages · rotational substitutions.
 
 ## TL;DR
 
-- **Automatic every Wednesday:** offensive tackles (+15), drops (+5), red-zone turnovers (+5 to everyone involved), non-QB TD passes (+20), taunting/unsportsmanlike (+15), pre-snap penalties (+5), invalid spots (−15, injuries auto-exempt).
+- **Automatic every Wednesday:** offensive tackles (+15), drops (+5), red-zone turnovers (+5 to everyone involved), non-QB TD passes (+20), taunting/unsportsmanlike (+15), pre-snap penalties (+5), invalid spots (−15, in-game injuries auto-exempt).
 - **Script flags, you confirm:** ejections (+20), goal-line celebration fumbles (+35).
 - **You report:** arrests, suspensions, cuts, gambling (Pete Rose), voluntary meltdowns (Antonio Brown), benchings (+20), and chaotic-event votes.
 - **Ping the commissioner** for anything manual. Records update if outcomes change. Chaos! 🔥

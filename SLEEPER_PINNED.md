@@ -44,8 +44,10 @@ You don't report these — the script handles them.
 
 The −15 targets *unavailable* players, not unlucky ones.
 
-- **Injured players are auto-exempt** — anyone ruled **Out or Doubtful** (or hurt
-  in-game) is excluded automatically.
+- **Hurt during the game = auto-exempt** — if a player is injured in-game, the
+  wasted spot isn't your fault.
+- **Ruled out before kickoff = NOT exempt** — that was known info, so starting
+  an inactive player is exactly the invalid spot this penalizes.
 - **Benched players are exempt** (see the Benching rule) — a benching is a +20
   reward, never also a −15. Report benchings so I can exempt them.
 - Exempted players are listed each week with the reason.

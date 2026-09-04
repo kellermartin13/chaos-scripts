@@ -965,51 +965,6 @@ def compute_touches(pbp):
     return touches
 
 
-def load_injured_out(season, week):
-    """
-    Players ruled "Out" or "Doubtful" on the week's injury report are unlikely
-    to have played (or played a full complement of snaps) due to injury and
-    must be exempt from the invalid-roster-spot penalty.
-
-    Returns:
-        gsis_id -> reason string
-    """
-
-    print(
-        f"Loading injury report for {season}..."
-    )
-
-    injuries = nfl.import_injuries([season])
-
-    injuries = injuries[
-        (injuries["week"] == week)
-        & (injuries["report_status"].isin(["Out", "Doubtful"]))
-    ]
-
-    result = {}
-
-    for _, row in injuries.iterrows():
-        gsis_id = row.get("gsis_id")
-
-        if pd.isna(gsis_id):
-            continue
-
-        status = row.get("report_status")
-        injury = row.get("report_primary_injury")
-
-        reason = f"ruled {status}"
-        if not pd.isna(injury):
-            reason = f"{reason} ({injury})"
-
-        result[str(gsis_id).strip()] = reason
-
-    print(
-        f"Loaded {len(result)} players ruled Out/Doubtful."
-    )
-
-    return result
-
-
 def find_ingame_injuries(pbp, starters):
     """
     Best-effort detection of players hurt during their game: scan play
@@ -1996,8 +1951,8 @@ def main():
         help=(
             "Player gsis id or full name to exempt from the -15 invalid "
             "roster penalty (e.g. a benched player awarded +20 separately). "
-            "Players ruled Out on the injury report are exempted "
-            "automatically."
+            "Players hurt during the game are exempted automatically; a "
+            "player ruled out before kickoff still counts as invalid."
         ),
     )
 
@@ -2143,16 +2098,13 @@ def main():
     )
 
     #
-    # Build invalid-spot exemptions: injured (auto) + benched/manual.
+    # Build invalid-spot exemptions. Only players hurt DURING the game are
+    # auto-exempt. A player ruled out before kickoff was known information, so
+    # starting him is an invalid roster spot. Benched players are exempted
+    # manually via --exempt-invalid (they are awarded +20 separately).
     #
 
     exempt = {}
-
-    for gsis_id, reason in load_injured_out(
-        args.season, args.week
-    ).items():
-        if gsis_id in starters:
-            exempt[gsis_id] = f"injury: {reason}"
 
     for gsis_id, reason in find_ingame_injuries(
         pbp, starters

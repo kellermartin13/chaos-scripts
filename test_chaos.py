@@ -1030,33 +1030,6 @@ class TestPrintCandidates:
 
 
 # ---------------------------------------------------------------------------
-# load_injured_out
-# ---------------------------------------------------------------------------
-
-class TestLoadInjuredOut:
-
-    def test_out_and_doubtful_included_questionable_excluded(self, monkeypatch):
-        df = pd.DataFrame([
-            {"week": 2, "gsis_id": " 00-1 ", "report_status": "Out",
-             "report_primary_injury": "Knee"},
-            {"week": 2, "gsis_id": "00-2", "report_status": "Questionable",
-             "report_primary_injury": "Ankle"},
-            {"week": 2, "gsis_id": "00-4", "report_status": "Doubtful",
-             "report_primary_injury": "Hamstring"},
-            {"week": 3, "gsis_id": "00-3", "report_status": "Out",
-             "report_primary_injury": "Groin"},
-        ])
-        monkeypatch.setattr(chaos.nfl, "import_injuries", lambda years: df)
-
-        result = chaos.load_injured_out(2025, 2)
-
-        assert result == {
-            "00-1": "ruled Out (Knee)",
-            "00-4": "ruled Doubtful (Hamstring)",
-        }
-
-
-# ---------------------------------------------------------------------------
 # find_ingame_injuries
 # ---------------------------------------------------------------------------
 
