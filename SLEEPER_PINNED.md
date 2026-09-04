@@ -102,11 +102,3 @@ their most recent game:
 **Does NOT qualify:** injury · illness · concussion protocol · load management ·
 resting starters · Week 18 shenanigans · blowout pulls · suspension · planned QB
 packages · rotational substitutions.
-
----
-
-## 📌 8 — 💰 Payouts ($160 pot)
-
-- **1st place:** $75
-- **Weekly high score (Weeks 1–17):** $5 each — applies in the playoffs too.
-- **Payouts: the Wednesday after the championship** (to account for stat corrections).

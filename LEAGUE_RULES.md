@@ -25,7 +25,7 @@ charted** (no partial weeks). So:
 > **Chaos adjustments are posted the Wednesday after each week's games.**
 
 If the numbers change your matchup result, **records are updated**. Late stat
-corrections can move things — that's why payouts wait until the season is done.
+corrections from the NFL can also move things after the fact.
 
 ---
 
@@ -120,15 +120,6 @@ A player **qualifies** if **any one** of these occurs:
 **Does NOT qualify:** injury · illness · concussion protocol · load management ·
 resting starters · Week 18 shenanigans · pulling starters in a blowout (winning
 or losing) · suspension · planned QB packages · rotational substitutions.
-
----
-
-## 💰 Payouts ($160 pot)
-
-- **1st place:** $75
-- **Weekly high score (Weeks 1–17):** $5 each
-- Highest-scoring week **applies in the playoffs** too.
-- **Payouts are made the Wednesday after the championship**, to account for stat corrections.
 
 ---
 
