@@ -237,7 +237,7 @@ class TestFindOffensiveTackles:
     def _pbp(self, rows):
         cols = [
             "game_id", "play_id", "qtr", "time",
-            "home_team", "away_team", "desc",
+            "home_team", "away_team", "desc", "special",
             "solo_tackle_1_player_id", "solo_tackle_2_player_id",
             "assist_tackle_1_player_id", "assist_tackle_2_player_id",
             "assist_tackle_3_player_id", "assist_tackle_4_player_id",
@@ -266,6 +266,15 @@ class TestFindOffensiveTackles:
         ])
         result = chaos.find_offensive_tackles(pbp, starters)
         assert "00-777" not in result
+
+    def test_special_teams_tackle_excluded(self, starters):
+        # a WR gunner making a punt-coverage tackle must NOT get the bonus.
+        pbp = self._pbp([
+            {"game_id": "g", "play_id": 1, "special": 1,
+             "assist_tackle_1_player_id": "00-2"},
+        ])
+        result = chaos.find_offensive_tackles(pbp, starters)
+        assert "00-2" not in result
 
 
 # ---------------------------------------------------------------------------

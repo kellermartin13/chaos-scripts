@@ -342,6 +342,7 @@ def load_pbp(season, week):
         "receiver_player_id",
         "rusher_player_id",
         "complete_pass",
+        "special",
 
         "fumble_not_forced",
         "fumbled_1_player_id",
@@ -437,6 +438,12 @@ def find_offensive_tackles(pbp, starters):
     }
 
     for _, play in pbp.iterrows():
+        # The bonus is for offensive players making tackles on offensive/
+        # defensive plays, not special-teams coverage tackles (punt/kickoff
+        # gunners, FG/XP), so skip special-teams plays entirely.
+        if play.get("special") == 1:
+            continue
+
         context = play_context(play)
 
         #
