@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import urllib.error
 from collections import defaultdict
 
 import pandas as pd
@@ -561,15 +562,36 @@ def load_ftn(season):
         f"Loading FTN charting for {season}..."
     )
 
-    ftn = nfl.import_ftn_data(
-        [season],
-        columns=[
-            "nflverse_game_id",
-            "nflverse_play_id",
-            "is_drop",
-        ],
-        downcast=True,
-    )
+    try:
+        ftn = nfl.import_ftn_data(
+            [season],
+            columns=[
+                "nflverse_game_id",
+                "nflverse_play_id",
+                "is_drop",
+            ],
+            downcast=True,
+        )
+    except urllib.error.HTTPError as error:
+        # nflverse publishes each season's FTN file only once games have been
+        # charted; requesting it before then 404s. Surface a clear message
+        # instead of a raw stack trace.
+        if error.code == 404:
+            print()
+            print("=" * 80)
+            print(
+                f"NO FTN DROP DATA PUBLISHED FOR {season} YET"
+            )
+            print("=" * 80)
+            print(
+                "nflverse has not released FTN charting for this season. "
+                "FTN charts each play within ~48h of a game, so this data "
+                "typically appears mid-week once games have been played. "
+                "Re-run once it is available."
+            )
+            sys.exit(1)
+
+        raise
 
     print(
         f"Loaded {len(ftn):,} FTN charted plays."

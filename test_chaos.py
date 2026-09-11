@@ -16,6 +16,7 @@ Network/nflverse calls are monkeypatched; no external I/O.
 import numpy as np
 import pandas as pd
 import pytest
+import urllib.error
 
 import chaos
 
@@ -344,6 +345,50 @@ class TestFindDrops:
     def test_non_starter_drop_excluded(self, pbp, ftn, starters):
         result = chaos.find_drops(pbp, ftn, starters)
         assert "00-777" not in result
+
+
+# ---------------------------------------------------------------------------
+# load_ftn
+# ---------------------------------------------------------------------------
+
+class TestLoadFtn:
+
+    def test_missing_season_404_exits_cleanly(self, monkeypatch, capsys):
+        def raise_404(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "url", 404, "Not Found", None, None
+            )
+
+        monkeypatch.setattr(chaos.nfl, "import_ftn_data", raise_404)
+
+        with pytest.raises(SystemExit) as exc:
+            chaos.load_ftn(2026)
+
+        assert exc.value.code == 1
+        assert "NO FTN DROP DATA PUBLISHED FOR 2026 YET" in capsys.readouterr().out
+
+    def test_non_404_http_error_reraises(self, monkeypatch):
+        def raise_500(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "url", 500, "Server Error", None, None
+            )
+
+        monkeypatch.setattr(chaos.nfl, "import_ftn_data", raise_500)
+
+        with pytest.raises(urllib.error.HTTPError):
+            chaos.load_ftn(2026)
+
+    def test_returns_dataframe_on_success(self, monkeypatch):
+        frame = pd.DataFrame(
+            {"nflverse_game_id": ["2025_01_A_B"], "is_drop": [True]}
+        )
+        monkeypatch.setattr(
+            chaos.nfl, "import_ftn_data", lambda *a, **k: frame
+        )
+
+        result = chaos.load_ftn(2025)
+
+        assert list(result["nflverse_game_id"]) == ["2025_01_A_B"]
 
 
 # ---------------------------------------------------------------------------
