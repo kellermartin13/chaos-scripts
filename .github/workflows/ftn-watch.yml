@@ -1,4 +1,4 @@
-name: FTN drop-data watch
+name: League of Chaos weekly scoring
 
 # Tue/Wed poller. Once the most-recently-completed NFL week is fully charted by
 # FTN, it scores the week with chaos.py and opens a GitHub issue containing the
