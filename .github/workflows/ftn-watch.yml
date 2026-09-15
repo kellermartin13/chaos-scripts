@@ -1,0 +1,106 @@
+name: FTN drop-data watch
+
+# Tue/Wed poller. Once the most-recently-completed NFL week is fully charted by
+# FTN, it scores the week with chaos.py and opens a GitHub issue containing the
+# report (which emails repo watchers). A per-week dedup guard makes every later
+# poll that same week a no-op, so the job effectively "stops for the week" once
+# scored; it resumes automatically next week when the target week advances.
+
+on:
+  schedule:
+    # Tue/Wed only: the week's last game (MNF) is charted by FTN within ~48h,
+    # so a full week becomes scoreable Tue->Wed. Runs at the 06/12/18 UTC FTN
+    # refreshes (01:00/07:00/13:00 US-Eastern). cron dow is UTC; harmless early
+    # polls simply report "not ready" and stay quiet.
+    - cron: '15 6,12,18 * * 2,3'
+  workflow_dispatch:
+    inputs:
+      season:
+        description: 'Season override (blank = auto-detect)'
+        required: false
+      week:
+        description: 'Week override (blank = auto-detect)'
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: ./install.sh
+
+      - name: Resolve target week
+        id: target
+        run: |
+          # Manual override takes precedence; otherwise auto-detect the most
+          # recently completed week via chaos.py --print-target.
+          if [ -n "${{ inputs.season }}" ] && [ -n "${{ inputs.week }}" ]; then
+            season="${{ inputs.season }}"
+            week="${{ inputs.week }}"
+          else
+            set +e
+            out=$(.venv/bin/python chaos.py --print-target)
+            code=$?
+            set -e
+            if [ $code -ne 0 ] || [ -z "$out" ]; then
+              echo "No completed regular-season week yet; nothing to do."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            season=$(echo "$out" | awk '{print $1}')
+            week=$(echo "$out" | awk '{print $2}')
+          fi
+          echo "season=$season" >> "$GITHUB_OUTPUT"
+          echo "week=$week" >> "$GITHUB_OUTPUT"
+          echo "title=Chaos: $season Week $week scores" >> "$GITHUB_OUTPUT"
+
+      - name: Stop if week already scored
+        id: dedup
+        if: steps.target.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Search open AND closed issues so a scored week never re-notifies,
+          # even after you close the issue. Title carries the week number, so
+          # the guard is week-specific and releases when the target advances.
+          existing=$(gh issue list --state all \
+            --search "${{ steps.target.outputs.title }} in:title" \
+            --json number --jq 'length')
+          if [ "$existing" != "0" ]; then
+            echo "Week already scored (issue exists); stopping for the week."
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Score the week (only if FTN is fully charted)
+        id: score
+        if: steps.target.outputs.skip != 'true' && steps.dedup.outputs.done != 'true'
+        run: |
+          # Full scoring; chaos.py's assert_week_fully_charted exits non-zero
+          # when the week is only partially charted, so a "not ready" week
+          # produces no scores and no notification.
+          set +e
+          .venv/bin/python chaos.py \
+            --season "${{ steps.target.outputs.season }}" \
+            --week "${{ steps.target.outputs.week }}" \
+            --flag-candidates | tee out.txt
+          echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Publish scores
+        if: steps.score.outputs.code == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "${{ steps.target.outputs.title }}" \
+            --body-file out.txt
