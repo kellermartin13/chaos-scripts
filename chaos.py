@@ -2230,6 +2230,20 @@ def main():
         run_check_only(args.season, args.week)
         return
 
+    #
+    # Gate on FTN coverage FIRST. A partially-charted week must exit here,
+    # before any Sleeper (players, league, starters) or play-by-play work, so
+    # a "not ready" run does no wasted loading. ftn is reused for drops below.
+    #
+
+    ftn = load_ftn(args.season)
+
+    assert_week_fully_charted(
+        args.season,
+        args.week,
+        ftn,
+    )
+
     print(
         "Loading Sleeper NFL players..."
     )
@@ -2312,25 +2326,6 @@ def main():
     tackles = find_offensive_tackles(
         pbp,
         starters,
-    )
-
-    #
-    # FTN charting
-    #
-
-    ftn = load_ftn(
-        args.season,
-    )
-
-    #
-    # Refuse to score a partial week: every scheduled game must be charted
-    # by FTN or the drop totals would be silently incomplete.
-    #
-
-    assert_week_fully_charted(
-        args.season,
-        args.week,
-        ftn,
     )
 
     drops = find_drops(

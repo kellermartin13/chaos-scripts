@@ -649,6 +649,38 @@ class TestProbesDoNotLoadSleeperPlayers:
 
         assert chaos.main() is None
 
+    def test_scoring_exits_before_loading_players_when_not_charted(
+        self, monkeypatch, explode_on_players
+    ):
+        # Full scoring run (no --check-only) on a week whose FTN coverage is
+        # incomplete must exit at the coverage gate BEFORE hitting Sleeper.
+        monkeypatch.setattr(
+            sys, "argv",
+            ["chaos.py", "--season", "2025", "--week", "2"],
+        )
+        monkeypatch.setattr(
+            chaos, "load_ftn",
+            lambda season: pd.DataFrame(
+                {"nflverse_game_id": ["2025_02_A_B"]}
+            ),
+        )
+        # Two scheduled games, only one charted -> incomplete.
+        monkeypatch.setattr(
+            chaos, "get_week_schedule",
+            lambda season, week: pd.DataFrame([
+                {"game_id": "2025_02_A_B",
+                 "away_team": "A", "home_team": "B"},
+                {"game_id": "2025_02_C_D",
+                 "away_team": "C", "home_team": "D"},
+            ]),
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            chaos.main()
+
+        # exited at the gate (not via the AssertionError from boom)
+        assert exc.value.code == 1
+
 
 # ---------------------------------------------------------------------------
 # compute_touches / find_invalid_roster_spots
