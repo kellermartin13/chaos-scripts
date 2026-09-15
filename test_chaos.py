@@ -16,7 +16,9 @@ Network/nflverse calls are monkeypatched; no external I/O.
 import numpy as np
 import pandas as pd
 import pytest
+import sys
 import urllib.error
+from datetime import date
 
 import chaos
 
@@ -432,6 +434,220 @@ class TestAssertWeekFullyCharted:
         )
         ftn = pd.DataFrame({"nflverse_game_id": []})
         assert chaos.assert_week_fully_charted(2025, 99, ftn) is None
+
+
+# ---------------------------------------------------------------------------
+# derive_target_season
+# ---------------------------------------------------------------------------
+
+class TestDeriveTargetSeason:
+
+    def test_regular_season_month_maps_to_current_year(self):
+        assert chaos.derive_target_season(date(2026, 9, 15)) == 2026
+
+    def test_december_maps_to_current_year(self):
+        assert chaos.derive_target_season(date(2026, 12, 31)) == 2026
+
+    def test_january_maps_to_prior_year(self):
+        assert chaos.derive_target_season(date(2026, 1, 15)) == 2025
+
+    def test_february_maps_to_prior_year(self):
+        assert chaos.derive_target_season(date(2026, 2, 28)) == 2025
+
+
+# ---------------------------------------------------------------------------
+# derive_target_week
+# ---------------------------------------------------------------------------
+
+class TestDeriveTargetWeek:
+
+    @pytest.fixture
+    def schedule(self):
+        # Weeks 1-3, each Thu/Sun/Mon; plus a non-REG row that must be ignored.
+        return pd.DataFrame([
+            {"game_type": "REG", "week": 1, "gameday": "2025-09-04"},
+            {"game_type": "REG", "week": 1, "gameday": "2025-09-08"},
+            {"game_type": "REG", "week": 2, "gameday": "2025-09-11"},
+            {"game_type": "REG", "week": 2, "gameday": "2025-09-15"},
+            {"game_type": "REG", "week": 3, "gameday": "2025-09-18"},
+            {"game_type": "REG", "week": 3, "gameday": "2025-09-22"},
+            {"game_type": "POST", "week": 1, "gameday": "2026-01-10"},
+        ])
+
+    @pytest.fixture
+    def patched(self, monkeypatch, schedule):
+        monkeypatch.setattr(
+            chaos.nfl, "import_schedules", lambda seasons: schedule
+        )
+
+    def test_returns_last_completed_week_midweek(self, patched):
+        # Tue after week 2's Monday game, before week 3 starts.
+        assert chaos.derive_target_week(2025, date(2025, 9, 16)) == 2
+
+    def test_thursday_overlap_stays_on_prior_week(self, patched):
+        # Week 3's Thursday game has been played, but its Monday game has not,
+        # so week 3 is not yet complete -> target remains week 2.
+        assert chaos.derive_target_week(2025, date(2025, 9, 18)) == 2
+
+    def test_returns_none_before_any_week_completes(self, patched):
+        assert chaos.derive_target_week(2025, date(2025, 9, 1)) is None
+
+    def test_ignores_non_regular_season_games(self, patched):
+        # After the POST game date, the highest completed REG week is still 3.
+        assert chaos.derive_target_week(2025, date(2026, 2, 1)) == 3
+
+    def test_ignores_unscheduled_games_with_missing_gameday(
+        self, monkeypatch
+    ):
+        schedule = pd.DataFrame([
+            {"game_type": "REG", "week": 1, "gameday": "2025-09-08"},
+            {"game_type": "REG", "week": 2, "gameday": None},
+        ])
+        monkeypatch.setattr(
+            chaos.nfl, "import_schedules", lambda seasons: schedule
+        )
+        # Week 2 has no dated games -> not completed; week 1 is.
+        assert chaos.derive_target_week(2025, date(2025, 9, 20)) == 1
+
+
+# ---------------------------------------------------------------------------
+# run_check_only
+# ---------------------------------------------------------------------------
+
+class TestRunCheckOnly:
+
+    @pytest.fixture
+    def schedule(self):
+        return pd.DataFrame([
+            {"game_id": "2025_02_A_B", "away_team": "A", "home_team": "B"},
+        ])
+
+    def test_prints_ready_when_fully_charted(
+        self, monkeypatch, capsys, schedule
+    ):
+        monkeypatch.setattr(
+            chaos, "load_ftn",
+            lambda season: pd.DataFrame(
+                {"nflverse_game_id": ["2025_02_A_B"]}
+            ),
+        )
+        monkeypatch.setattr(
+            chaos, "get_week_schedule", lambda season, week: schedule
+        )
+
+        chaos.run_check_only(2025, 2)
+
+        assert "READY: 2025 Week 2" in capsys.readouterr().out
+
+    def test_propagates_exit_when_not_charted(
+        self, monkeypatch, schedule
+    ):
+        monkeypatch.setattr(
+            chaos, "load_ftn",
+            lambda season: pd.DataFrame({"nflverse_game_id": []}),
+        )
+        monkeypatch.setattr(
+            chaos, "get_week_schedule", lambda season, week: schedule
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            chaos.run_check_only(2025, 2)
+
+        assert exc.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# main --print-target
+# ---------------------------------------------------------------------------
+
+class TestMainPrintTarget:
+
+    def test_prints_resolved_season_and_week(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["chaos.py", "--print-target"])
+        monkeypatch.setattr(chaos, "derive_target_season", lambda: 2025)
+        monkeypatch.setattr(chaos, "derive_target_week", lambda season: 2)
+
+        chaos.main()
+
+        assert capsys.readouterr().out.strip() == "2025 2"
+
+    def test_uses_explicit_args_without_deriving(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys, "argv",
+            ["chaos.py", "--print-target", "--season", "2024", "--week", "7"],
+        )
+
+        chaos.main()
+
+        assert capsys.readouterr().out.strip() == "2024 7"
+
+    def test_exits_1_and_silent_when_no_week_completed(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(sys, "argv", ["chaos.py", "--print-target"])
+        monkeypatch.setattr(chaos, "derive_target_season", lambda: 2025)
+        monkeypatch.setattr(chaos, "derive_target_week", lambda season: None)
+
+        with pytest.raises(SystemExit) as exc:
+            chaos.main()
+
+        assert exc.value.code == 1
+        # nothing printed to stdout so automation can rely on empty output
+        assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# probes must not load Sleeper players
+# ---------------------------------------------------------------------------
+
+class TestProbesDoNotLoadSleeperPlayers:
+    """
+    --check-only and --print-target must never hit Sleeper for players; the
+    player map is only needed when scores are actually calculated.
+    """
+
+    @pytest.fixture
+    def explode_on_players(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise AssertionError(
+                "get_sleeper_players called during a no-score probe"
+            )
+
+        monkeypatch.setattr(chaos, "get_sleeper_players", boom)
+
+    def test_check_only_does_not_load_players(
+        self, monkeypatch, explode_on_players
+    ):
+        monkeypatch.setattr(
+            sys, "argv",
+            ["chaos.py", "--check-only", "--season", "2025", "--week", "2"],
+        )
+        monkeypatch.setattr(
+            chaos, "load_ftn",
+            lambda season: pd.DataFrame(
+                {"nflverse_game_id": ["2025_02_A_B"]}
+            ),
+        )
+        monkeypatch.setattr(
+            chaos, "get_week_schedule",
+            lambda season, week: pd.DataFrame([
+                {"game_id": "2025_02_A_B",
+                 "away_team": "A", "home_team": "B"},
+            ]),
+        )
+
+        # returns cleanly without the AssertionError from boom
+        assert chaos.main() is None
+
+    def test_print_target_does_not_load_players(
+        self, monkeypatch, explode_on_players
+    ):
+        monkeypatch.setattr(
+            sys, "argv",
+            ["chaos.py", "--print-target", "--season", "2024", "--week", "7"],
+        )
+
+        assert chaos.main() is None
 
 
 # ---------------------------------------------------------------------------

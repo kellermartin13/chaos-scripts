@@ -4,10 +4,14 @@ import argparse
 import sys
 import urllib.error
 from collections import defaultdict
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
 import nfl_data_py as nfl
+
+from sleeper_cache import cached_players
 
 
 # =============================================================================
@@ -17,6 +21,10 @@ import nfl_data_py as nfl
 SLEEPER_BASE = "https://api.sleeper.app/v1"
 
 DEFAULT_LEAGUE_ID = "1312284808574935040"
+
+# Timezone used to decide which NFL week has completed. NFL scheduling is
+# anchored to US/Eastern, so week-boundary math is done in this zone.
+EASTERN = ZoneInfo("America/New_York")
 
 TACKLE_POINTS = 15
 DROP_POINTS = 5
@@ -107,9 +115,15 @@ def get_sleeper_players():
 
     Value:
         Player metadata including gsis_id, position, name, etc.
+
+    Served from the shared local Redis cache (see sleeper_cache) so chaos.py
+    and trade_review.py reuse one cached copy of this large, once-a-day payload.
+    Falls back to a live fetch when Redis is unavailable.
     """
 
-    return get_json(f"{SLEEPER_BASE}/players/nfl")
+    return cached_players(
+        lambda: get_json(f"{SLEEPER_BASE}/players/nfl")
+    )
 
 
 def get_league(league_id):
@@ -615,6 +629,56 @@ def get_week_schedule(season, week):
     ]
 
 
+def derive_target_season(today=None):
+    """
+    Infer the season to score from the calendar date.
+
+    The NFL season is labeled by its starting year. The regular season runs
+    Sep-Dec and the postseason spills into Jan-Feb, which still belongs to the
+    prior year's season. So Jan/Feb map to year-1; March onward maps to the
+    current year.
+    """
+    today = today or datetime.now(EASTERN).date()
+
+    return today.year - 1 if today.month <= 2 else today.year
+
+
+def derive_target_week(season, today=None):
+    """
+    Return the most-recently-completed regular-season week: the highest REG
+    week whose games have all been played.
+
+    A week counts as "completed" once the calendar date (US/Eastern) is past
+    the week's last scheduled game day. Date granularity (rather than exact
+    kickoff times) is sufficient because FTN charting lags games by ~48h and
+    the real readiness gate is assert_week_fully_charted. This rule is
+    self-correcting across the Thursday boundary: once week N+1's Thursday game
+    starts, week N+1 is still incomplete (its Monday game is in the future), so
+    the target stays week N until N+1 finishes.
+
+    Returns the week number, or None if no regular-season week has completed
+    yet (e.g. preseason).
+    """
+    today = today or datetime.now(EASTERN).date()
+
+    schedule = nfl.import_schedules([season])
+
+    reg = schedule[schedule["game_type"] == "REG"]
+
+    completed = []
+
+    for week, games in reg.groupby("week"):
+        last_gameday = pd.to_datetime(games["gameday"]).max()
+
+        if pd.isna(last_gameday):
+            continue
+
+        if last_gameday.date() < today:
+            completed.append(int(week))
+
+    return max(completed) if completed else None
+
+
 def assert_week_fully_charted(season, week, ftn):
     """
     Drops are only trustworthy once FTN has charted every game in the week.
@@ -679,6 +743,28 @@ def assert_week_fully_charted(season, week, ftn):
         f"FTN drop data complete: "
         f"all {len(scheduled_ids)} games charted."
     )
+
+
+def run_check_only(season, week):
+    """
+    Cheap readiness probe for automation (e.g. a cron poller).
+
+    Loads only the FTN charting for the season and verifies every scheduled
+    game in the week is charted -- no Sleeper lineups, play-by-play, or snap
+    counts are fetched. load_ftn / assert_week_fully_charted already exit
+    non-zero when the season file is unpublished or the week is only partially
+    charted, so a zero exit means the week is ready to score.
+    """
+    ftn = load_ftn(season)
+
+    assert_week_fully_charted(season, week, ftn)
+
+    print()
+    print("=" * 80)
+    print(
+        f"READY: {season} Week {week} is fully charted and can be scored."
+    )
+    print("=" * 80)
 
 
 def find_drops(pbp, ftn, starters):
@@ -2020,15 +2106,21 @@ def main():
     parser.add_argument(
         "--week",
         type=int,
-        required=True,
-        help="NFL regular-season week",
+        default=None,
+        help=(
+            "NFL regular-season week. If omitted, the most-recently-completed "
+            "week is auto-detected from the schedule."
+        ),
     )
 
     parser.add_argument(
         "--season",
         type=int,
-        default=2026,
-        help="NFL season (default: 2026)",
+        default=None,
+        help=(
+            "NFL season. If omitted, it is auto-detected from the current "
+            "date (Jan/Feb map to the prior year's season)."
+        ),
     )
 
     parser.add_argument(
@@ -2073,11 +2165,70 @@ def main():
         ),
     )
 
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help=(
+            "Only check whether the (auto-detected or given) week is fully "
+            "charted by FTN, then exit. Fetches nothing from Sleeper and does "
+            "no scoring. Exits 0 when ready, non-zero when not yet charted. "
+            "Intended for a scheduled poller."
+        ),
+    )
+
+    parser.add_argument(
+        "--print-target",
+        action="store_true",
+        help=(
+            "Print the resolved '<season> <week>' target to stdout and exit "
+            "(exit 1 if no regular-season week has completed). Used by "
+            "automation to learn the target week before scoring."
+        ),
+    )
+
     args = parser.parse_args()
 
     #
-    # Sleeper
+    # Resolve the target season/week. When not given explicitly, derive them
+    # from the calendar so automation (see --check-only) needs no weekly
+    # babysitting: the target is always the most-recently-completed week.
     #
+
+    if args.season is None:
+        args.season = derive_target_season()
+
+    if args.week is None:
+        args.week = derive_target_week(args.season)
+
+        if args.week is None:
+            if not args.print_target:
+                print(
+                    f"No regular-season week has completed yet for "
+                    f"{args.season}; nothing to score."
+                )
+            sys.exit(1)
+
+        if not args.print_target:
+            print(
+                f"Auto-detected target: {args.season} Week {args.week}."
+            )
+
+    #
+    # Emit the resolved target for automation and exit (no scoring).
+    #
+
+    if args.print_target:
+        print(f"{args.season} {args.week}")
+        return
+
+    #
+    # Cheap readiness probe for schedulers: check FTN coverage and exit
+    # without touching Sleeper / pbp / snaps.
+    #
+
+    if args.check_only:
+        run_check_only(args.season, args.week)
+        return
 
     print(
         "Loading Sleeper NFL players..."
