@@ -12,5 +12,6 @@
 numpy==1.26.4
 pandas==2.2.3
 requests==2.34.2
+redis==5.2.1
 appdirs==1.4.4
 fastparquet==2026.5.0
