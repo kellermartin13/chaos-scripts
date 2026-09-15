@@ -103,4 +103,5 @@ jobs:
         run: |
           gh issue create \
             --title "${{ steps.target.outputs.title }}" \
-            --body-file out.txt
+            --body-file out.txt \
+            --assignee kellermartin13
