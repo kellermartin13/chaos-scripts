@@ -8,10 +8,12 @@ name: League of Chaos weekly scoring
 
 on:
   schedule:
-    # Tue/Wed only: the week's last game (MNF) is charted by FTN within ~48h,
-    # so a full week becomes scoreable Tue->Wed. Runs at the 06/12/18 UTC FTN
-    # refreshes (01:00/07:00/13:00 US-Eastern). cron dow is UTC; harmless early
-    # polls simply report "not ready" and stay quiet.
+    # Tue/Wed only: a week's last game (MNF) is usually charted by FTN within
+    # ~48h, so a completed week tends to become scoreable Tue->Wed. FTN's actual
+    # publish time is not fixed and can land overnight, so we poll several times
+    # across both days (06/12/18 UTC) and let the coverage gate decide. A poll
+    # that runs before the data is complete just reports "not ready" and stays
+    # quiet. cron uses UTC.
     - cron: '15 6,12,18 * * 2,3'
   workflow_dispatch:
     inputs:
@@ -81,26 +83,28 @@ jobs:
             echo "done=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Score the week (only if FTN is fully charted)
-        id: score
+      - name: Score the week and publish (skipped if already scored)
         if: steps.target.outputs.skip != 'true' && steps.dedup.outputs.done != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Full scoring; chaos.py's assert_week_fully_charted exits non-zero
-          # when the week is only partially charted, so a "not ready" week
-          # produces no scores and no notification.
+          # when the week is only partially charted. Scoring and publishing live
+          # in ONE step so out.txt is written and consumed together: no separate
+          # Publish step can fire on a missing file when this step is skipped.
           set +e
           .venv/bin/python chaos.py \
             --season "${{ steps.target.outputs.season }}" \
             --week "${{ steps.target.outputs.week }}" \
             --flag-candidates | tee out.txt
-          echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          code=${PIPESTATUS[0]}
           set -e
 
-      - name: Publish scores
-        if: steps.score.outputs.code == '0'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
+          if [ "$code" -ne 0 ]; then
+            echo "Week not fully charted yet (chaos.py exit $code); no issue created."
+            exit 0
+          fi
+
           gh issue create \
             --title "${{ steps.target.outputs.title }}" \
             --body-file out.txt \
