@@ -8,13 +8,13 @@ name: League of Chaos weekly scoring
 
 on:
   schedule:
-    # Tue/Wed only: a week's last game (MNF) is usually charted by FTN within
-    # ~48h, so a completed week tends to become scoreable Tue->Wed. FTN's actual
-    # publish time is not fixed and can land overnight, so we poll several times
-    # across both days (06/12/18 UTC) and let the coverage gate decide. A poll
-    # that runs before the data is complete just reports "not ready" and stays
-    # quiet. cron uses UTC.
-    - cron: '15 6,12,18 * * 2,3'
+    # Every 3h across the 8am-10pm Central window (slots: 8am, 11am, 2pm, 5pm,
+    # 8pm) on Tue & Wed local. GitHub cron is UTC with no DST awareness; these
+    # assume CDT (UTC-5, in effect Sep-early Nov). After DST ends, local times
+    # shift 1h earlier until repinned. The 8pm-Central slot is 01:00 UTC the
+    # NEXT day, so it needs its own line with the weekday shifted forward.
+    - cron: '0 13,16,19,22 * * 2,3'   # 8am, 11am, 2pm, 5pm CDT (Tue, Wed)
+    - cron: '0 1 * * 3,4'             # 8pm CDT (Tue, Wed) = 01:00 UTC next day
   workflow_dispatch:
     inputs:
       season:
