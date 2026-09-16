@@ -8,13 +8,13 @@ name: League of Chaos weekly scoring
 
 on:
   schedule:
-    # Every 3h across the 8am-10pm Central window (slots: 8am, 11am, 2pm, 5pm,
-    # 8pm) on Tue & Wed local. GitHub cron is UTC with no DST awareness; these
-    # assume CDT (UTC-5, in effect Sep-early Nov). After DST ends, local times
-    # shift 1h earlier until repinned. The 8pm-Central slot is 01:00 UTC the
-    # NEXT day, so it needs its own line with the weekday shifted forward.
+    # Poll on Tue & Wed local: 8am, 11am, 2pm, 5pm, 8pm, 10pm Central. GitHub
+    # cron is UTC with no DST awareness; these assume CDT (UTC-5, in effect
+    # Sep-early Nov). After DST ends, local times shift 1h earlier until
+    # repinned. The 8pm and 10pm Central slots are 01:00 and 03:00 UTC the NEXT
+    # day, so they use a second line with the weekday shifted forward.
     - cron: '0 13,16,19,22 * * 2,3'   # 8am, 11am, 2pm, 5pm CDT (Tue, Wed)
-    - cron: '0 1 * * 3,4'             # 8pm CDT (Tue, Wed) = 01:00 UTC next day
+    - cron: '0 1,3 * * 3,4'           # 8pm & 10pm CDT (Tue, Wed) = 01:00/03:00 UTC next day
   workflow_dispatch:
     inputs:
       season:
