@@ -203,7 +203,29 @@ league history), so `--season` is all you normally change.
 | `--exempt-invalid "Name" ...` | Exempt benched players from the −15 penalty (accepts full names or gsis ids). Injured players are exempted automatically. |
 | `--flag-candidates`           | Also print review candidates (ejections, goal-line fumbles).                                                              |
 | `--solo-tackles-only`         | Only award +15 for solo offensive tackles.                                                                                |
+| `--adjust "Team:+20"`         | Manual chaos award layered on top of auto-scoring for the result-change analysis (team name or roster id; repeatable).    |
+| `--adjust-file PATH`          | File of manual chaos awards, one `Team:+points` per line (blank lines and `#` comments ignored).                          |
+| `--html`                      | Emit the report as a self-contained HTML page (for GitHub Pages) instead of text.                                         |
+| `--html-out PATH`             | Also write the HTML page to PATH while printing the text report (one run feeds both the issue and Pages).                 |
 | `--league-id ID`              | Score a different Sleeper league.                                                                                         |
+
+### Matchup & high-scorer changes
+
+Chaos adjustments live on top of standard Sleeper scoring, so they can change
+what actually happened that week. After the audit, the report prints a **Chaos
+Impact** section covering two things:
+
+- **Matchup result changes** — any head-to-head whose winner flips once chaos
+  adjustments are applied to the Sleeper base scores (including ties made or
+  broken), shown as `base → adjusted` with the before/after winner.
+- **Weekly high scorer ($5)** — whether the league's top scorer (and the $5
+  payout) changes after chaos.
+
+The comparison uses each team's **base Sleeper points plus every auto-scored
+chaos adjustment** (`compute_team_adjustments`). Commissioner awards that the
+script doesn't compute (benchings, confirmed ejections/goal-line fumbles,
+chaotic-event votes) can be layered in with `--adjust "Team:+20"` (repeatable)
+or `--adjust-file`; they're added on top before the flip/high-scorer math.
 
 ### When results are ready
 
@@ -212,6 +234,27 @@ charting. FTN charts each play within ~48 hours of a game, and the script
 **refuses to score a week until every game has been charted** (no partial
 weeks). In practice that means **Chaos adjustments post the Wednesday after each
 week's games**.
+
+### Running as a GitHub Action
+
+`.github/workflows/ftn-watch.yml` polls Tue/Wed on a schedule; once the week is
+fully charted it scores it, opens a GitHub issue with the report (emailing repo
+watchers), and publishes an HTML page to **GitHub Pages** at
+`https://<owner>.github.io/<repo>/chaos/<season>/week-<week>.html` (each week
+its own permanent URL, via `keep_files: true`). The Pages URL is printed as a
+run annotation and in the Job Summary. A per-week dedup guard makes later polls
+that same week a no-op.
+
+**Manual dispatch** (Actions → *League of Chaos weekly scoring* → *Run
+workflow*) always re-runs — override season/week if needed, and paste manual
+chaos awards into the **adjustments** input (one `Team:+points` per line) to
+re-publish with benchings/ejections/etc. folded into the matchup and
+high-scorer analysis. One `chaos.py --html-out` run produces both the issue
+text and the page, so nflverse/Sleeper data is loaded once. The ~16 MB player
+map is cached with `actions/cache` (see below).
+
+Requires the same one-time **Settings → Pages → Deploy from a branch →
+`gh-pages` / `/ (root)`** setup as the trade-review page.
 
 ## Testing
 
@@ -242,6 +285,7 @@ All automated stats come from nflverse via
 | `test_trade_review.py`        | pytest suite for the trade-review tool.              |
 | `sleeper_cache.py`            | Shared local Redis cache for the Sleeper player map. |
 | `test_sleeper_cache.py`       | pytest suite for the shared cache.                   |
+| `report_html.py`              | Shared HTML shell/CSS for the GitHub Pages reports.  |
 | `requirements.txt`            | Pinned dependencies.                                 |
 | `install.sh`                  | One-command environment setup.                       |
 | `LEAGUE_RULES.md` / `.docx`   | Full league rulebook.                                |
