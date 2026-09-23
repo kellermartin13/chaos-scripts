@@ -1363,3 +1363,44 @@ class TestAttachLineage:
         scrub = scenario[0]["sides"][1]["assets"][1]
 
         assert "lineage ends" in tr._par_lineage_line(scrub)
+
+
+# ---------------------------------------------------------------------------
+# wrap_report_html / _report_title (GitHub Pages output)
+# ---------------------------------------------------------------------------
+
+class TestWrapReportHtml:
+
+    def test_escapes_report_text(self):
+        out = tr.wrap_report_html(
+            "winner > loser & <b>", "L", generated="2026-01-01 00:00 UTC"
+        )
+
+        assert "winner &gt; loser &amp; &lt;b&gt;" in out
+
+    def test_includes_title_and_lang(self):
+        out = tr.wrap_report_html("x", "My League", generated="t")
+
+        assert "<title>My League</title>" in out and 'lang="en"' in out
+
+    def test_wraps_body_in_pre(self):
+        out = tr.wrap_report_html("body-text", "L", generated="t")
+
+        assert "<pre>body-text</pre>" in out
+
+    def test_escapes_title(self):
+        out = tr.wrap_report_html("x", "A & B <x>", generated="t")
+
+        assert "<title>A &amp; B &lt;x&gt;</title>" in out
+
+
+class TestReportTitle:
+
+    def test_includes_season_when_given(self):
+        assert tr._report_title("Chaos", "2025") == "Chaos — Trade Review (PAR) · 2025"
+
+    def test_omits_season_when_absent(self):
+        assert tr._report_title("Chaos") == "Chaos — Trade Review (PAR)"
+
+    def test_falls_back_to_dynasty_without_name(self):
+        assert tr._report_title(None) == "Dynasty — Trade Review (PAR)"

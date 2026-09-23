@@ -29,8 +29,12 @@ leaning on them for decisions.
 """
 
 import argparse
+import contextlib
+import html
+import io
 import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 
 import requests
 
@@ -1972,6 +1976,51 @@ def print_par_report(reviews, league_name=None, top=12, floored=True):
         print()
 
 
+def _report_title(league_name, season=None):
+    base = f"{league_name or 'Dynasty'} — Trade Review (PAR)"
+    return f"{base} · {season}" if season else base
+
+
+def wrap_report_html(report_text, title, generated=None):
+    """
+    Wrap a monospace text report in a minimal, self-contained HTML page for
+    GitHub Pages. The report is HTML-escaped and dropped into a <pre>, so the
+    fixed-width alignment (columns, box-drawing, trajectories) is preserved.
+    """
+
+    if generated is None:
+        generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    safe_title = html.escape(title)
+    body = html.escape(report_text)
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{safe_title}</title>
+<style>
+  body {{ margin:0; background:#0d1117; color:#e6edf3;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
+  header {{ padding:1rem 1.25rem; border-bottom:1px solid #30363d; }}
+  h1 {{ font-size:1.05rem; margin:0; }}
+  .meta {{ color:#8b949e; font-size:.8rem; margin-top:.3rem; }}
+  pre {{ padding:1.25rem; margin:0; overflow-x:auto; font-size:.82rem;
+    line-height:1.4; white-space:pre; }}
+</style>
+</head>
+<body>
+<header>
+<h1>{safe_title}</h1>
+<div class="meta">Generated {html.escape(generated)} · Points Above Replacement</div>
+</header>
+<pre>{body}</pre>
+</body>
+</html>
+"""
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -2028,77 +2077,123 @@ def main():
         action="store_true",
         help="Print the legacy points-only report instead of the PAR report.",
     )
+    parser.add_argument(
+        "--html",
+        action="store_true",
+        help=(
+            "Emit the report as a self-contained HTML page (for GitHub Pages) "
+            "instead of plain text. Progress goes to stderr so stdout is pure "
+            "HTML."
+        ),
+    )
 
     args = parser.parse_args()
 
-    print("=" * 80, file=sys.stderr)
-    print(WIP_DISCLAIMER, file=sys.stderr)
-    print("=" * 80, file=sys.stderr)
+    # Progress + disclaimer go to stderr so stdout carries only the report
+    # (plain text or, with --html, a clean HTML document).
+    def log(message):
+        print(message, file=sys.stderr)
 
-    print("Building dynasty league chain...")
+    log("=" * 80)
+    log(WIP_DISCLAIMER)
+    log("=" * 80)
+
+    log("Building dynasty league chain...")
     chain = build_league_chain(args.league_id)
 
     if not chain:
-        print(f"No league found for id {args.league_id}.")
+        log(f"No league found for id {args.league_id}.")
         return
 
     league_name = chain[0].get("name")
     seasons = ", ".join(str(league.get("season")) for league in chain)
-    print(f"Found {len(chain)} season(s) for \"{league_name}\": {seasons}.")
+    log(f"Found {len(chain)} season(s) for \"{league_name}\": {seasons}.")
 
-    print("Loading Sleeper player map...")
+    log("Loading Sleeper player map...")
     players = get_players()
-    print(f"Loaded {len(players):,} player records.")
+    log(f"Loaded {len(players):,} player records.")
 
-    print("Loading team names per season...")
+    log("Loading team names per season...")
     team_names_by_season = build_team_names_by_season(chain)
 
-    print("Building manager directory...")
+    log("Building manager directory...")
     directory = build_manager_directory(chain)
 
-    # ---- Legacy raw-points report -----------------------------------------
+    # Build the report writer for the selected mode, then emit it either as
+    # plain text or wrapped in HTML.
     if args.raw_points:
-        print("Collecting trades and scoring raw production since each...")
+        log("Collecting trades and scoring raw production since each...")
         reviews = build_all_reviews(chain, players, season_filter=args.season)
-        print_report(reviews, team_names_by_season, league_name=league_name)
         overview = compute_manager_overview(
             reviews, directory["owner_by_season_roster"]
         )
-        print_manager_overview(overview, directory["names"])
-        return
 
-    # ---- Default PAR report -----------------------------------------------
-    print("Collecting trades, ownership timeline, and replacement baselines...")
-    chain_index = index_chain(chain)
-    trades = collect_trades(chain)
-    if args.season:
-        trades = [t for t in trades if t["season"] == str(args.season)]
+        def write():
+            print_report(reviews, team_names_by_season, league_name=league_name)
+            print_manager_overview(overview, directory["names"])
+    else:
+        log("Collecting trades, ownership timeline, and replacement baselines...")
+        chain_index = index_chain(chain)
 
-    ctx = {
-        "chain_index": chain_index,
-        "players": players,
-        "pick_index": build_pick_index(chain),
-        "team_names": team_names_by_season,
-        "stats_cache": WeeklyStatsCache(),
-        "timeline": build_ownership_timeline(chain),
-        "floor": not args.unfloored,
-        "baseline_cache": ReplacementBaselineCache(
-            chain_index, players, WeeklyStatsCache(),
-            build_replacement_ranks_by_season(chain_index), band=args.band,
-        ),
-    }
+        # Share one memoized pass of the transaction log across trade
+        # collection and the ownership timeline (both scan every week), so each
+        # week's transactions is fetched once, not twice. Likewise share a
+        # single WeeklyStatsCache between the report and the replacement
+        # baselines. Together these halve the two largest Sleeper call buckets
+        # and keep us well clear of the ~1000 req/min guidance.
+        _txn_cache = {}
 
-    reviews = [build_par_review(trade, ctx) for trade in trades]
-    attach_lineage(reviews, trades)
+        def txn_fetch(league_id, week):
+            key = (league_id, week)
+            if key not in _txn_cache:
+                _txn_cache[key] = get_transactions(league_id, week)
+            return _txn_cache[key]
 
-    print_par_report(
-        reviews, league_name=league_name, top=args.top, floored=ctx["floor"]
-    )
+        stats_cache = WeeklyStatsCache()
 
-    overview = compute_manager_overview(
-        reviews, directory["owner_by_season_roster"]
-    )
-    print_manager_overview(overview, directory["names"], unit="PAR")
+        trades = collect_trades(chain, fetch=txn_fetch)
+        if args.season:
+            trades = [t for t in trades if t["season"] == str(args.season)]
+
+        ctx = {
+            "chain_index": chain_index,
+            "players": players,
+            "pick_index": build_pick_index(chain),
+            "team_names": team_names_by_season,
+            "stats_cache": stats_cache,
+            "timeline": build_ownership_timeline(chain, fetch=txn_fetch),
+            "floor": not args.unfloored,
+            "baseline_cache": ReplacementBaselineCache(
+                chain_index, players, stats_cache,
+                build_replacement_ranks_by_season(chain_index), band=args.band,
+            ),
+        }
+
+        reviews = [build_par_review(trade, ctx) for trade in trades]
+        attach_lineage(reviews, trades)
+        overview = compute_manager_overview(
+            reviews, directory["owner_by_season_roster"]
+        )
+
+        def write():
+            print_par_report(
+                reviews, league_name=league_name, top=args.top,
+                floored=ctx["floor"],
+            )
+            print_manager_overview(overview, directory["names"], unit="PAR")
+
+    if args.html:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            write()
+        print(
+            wrap_report_html(
+                buffer.getvalue(),
+                _report_title(league_name, args.season),
+            )
+        )
+    else:
+        write()
 
 
 if __name__ == "__main__":
