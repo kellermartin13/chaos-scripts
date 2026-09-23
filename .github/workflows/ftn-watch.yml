@@ -1,20 +1,16 @@
 name: League of Chaos weekly scoring
 
 # Tue/Wed poller. Once the most-recently-completed NFL week is fully charted by
-# FTN, it scores the week with chaos.py and opens a GitHub issue containing the
-# report (which emails repo watchers). A per-week dedup guard makes every later
-# poll that same week a no-op, so the job effectively "stops for the week" once
-# scored; it resumes automatically next week when the target week advances.
+# FTN, it scores the week with chaos.py, opens a GitHub issue with the report
+# (which emails repo watchers), and publishes an HTML page to GitHub Pages at
+# /chaos/<season>/week-<week>.html. A per-week dedup guard makes later polls
+# that same week a no-op; manual dispatch always re-runs (so you can re-publish
+# with manual chaos awards via the `adjustments` input).
 
 on:
   schedule:
-    # Poll on Tue & Wed local: 8am, 11am, 2pm, 5pm, 8pm, 10pm Central. GitHub
-    # cron is UTC with no DST awareness; these assume CDT (UTC-5, in effect
-    # Sep-early Nov). After DST ends, local times shift 1h earlier until
-    # repinned. The 8pm and 10pm Central slots are 01:00 and 03:00 UTC the NEXT
-    # day, so they use a second line with the weekday shifted forward.
     - cron: '0 13,16,19,22 * * 2,3'   # 8am, 11am, 2pm, 5pm CDT (Tue, Wed)
-    - cron: '0 1,3 * * 3,4'           # 8pm & 10pm CDT (Tue, Wed) = 01:00/03:00 UTC next day
+    - cron: '0 1,3 * * 3,4'           # 8pm & 10pm CDT (Tue, Wed) next-day UTC
   workflow_dispatch:
     inputs:
       season:
@@ -23,14 +19,26 @@ on:
       week:
         description: 'Week override (blank = auto-detect)'
         required: false
+      adjustments:
+        description: 'Manual chaos awards, one "Team:+points" per line (optional)'
+        required: false
+        type: string
 
 permissions:
-  contents: read
+  contents: write   # publish to gh-pages
   issues: write
+
+# Serialize so concurrent runs don't race on gh-pages or Sleeper.
+concurrency:
+  group: chaos-scoring
+  cancel-in-progress: false
 
 jobs:
   poll-and-score:
     runs-on: ubuntu-latest
+    env:
+      # File cache for the ~16 MB Sleeper player map; persisted across runs.
+      SLEEPER_PLAYERS_FILE: .sleeper-cache/players-nfl.json
     steps:
       - uses: actions/checkout@v5
 
@@ -41,14 +49,26 @@ jobs:
       - name: Install dependencies
         run: ./install.sh
 
+      - name: Date key for player-map cache
+        id: date
+        run: echo "today=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Sleeper player map
+        uses: actions/cache@v4
+        with:
+          path: .sleeper-cache
+          key: sleeper-players-${{ steps.date.outputs.today }}
+
       - name: Resolve target week
         id: target
+        env:
+          IN_SEASON: ${{ inputs.season }}
+          IN_WEEK: ${{ inputs.week }}
         run: |
           # Manual override takes precedence; otherwise auto-detect the most
           # recently completed week via chaos.py --print-target.
-          if [ -n "${{ inputs.season }}" ] && [ -n "${{ inputs.week }}" ]; then
-            season="${{ inputs.season }}"
-            week="${{ inputs.week }}"
+          if [ -n "$IN_SEASON" ] && [ -n "$IN_WEEK" ]; then
+            season="$IN_SEASON"; week="$IN_WEEK"
           else
             set +e
             out=$(.venv/bin/python chaos.py --print-target)
@@ -66,46 +86,87 @@ jobs:
           echo "week=$week" >> "$GITHUB_OUTPUT"
           echo "title=Chaos: $season Week $week scores" >> "$GITHUB_OUTPUT"
 
-      - name: Stop if week already scored
+      - name: Stop if week already scored (scheduled runs only)
         id: dedup
-        if: steps.target.outputs.skip != 'true'
+        if: steps.target.outputs.skip != 'true' && github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ steps.target.outputs.title }}
         run: |
-          # Search open AND closed issues so a scored week never re-notifies,
-          # even after you close the issue. Title carries the week number, so
-          # the guard is week-specific and releases when the target advances.
+          # Search open AND closed issues so a scored week never re-notifies.
+          # Manual dispatch skips this guard so you can re-publish on demand.
           existing=$(gh issue list --state all \
-            --search "${{ steps.target.outputs.title }} in:title" \
-            --json number --jq 'length')
+            --search "$TITLE in:title" --json number --jq 'length')
           if [ "$existing" != "0" ]; then
             echo "Week already scored (issue exists); stopping for the week."
             echo "done=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Score the week and publish (skipped if already scored)
+      - name: Score, open issue, and build HTML page
+        id: score
         if: steps.target.outputs.skip != 'true' && steps.dedup.outputs.done != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          SEASON: ${{ steps.target.outputs.season }}
+          WEEK: ${{ steps.target.outputs.week }}
+          TITLE: ${{ steps.target.outputs.title }}
+          ADJUSTMENTS: ${{ inputs.adjustments }}
         run: |
-          # Full scoring; chaos.py's assert_week_fully_charted exits non-zero
-          # when the week is only partially charted. Scoring and publishing live
-          # in ONE step so out.txt is written and consumed together: no separate
-          # Publish step can fire on a missing file when this step is skipped.
+          set -uo pipefail
+
+          # Optional manual chaos awards (multiline input -> file, never
+          # interpolated into the shell).
+          adj_args=()
+          if [ -n "${ADJUSTMENTS:-}" ]; then
+            printf '%s\n' "$ADJUSTMENTS" > adjustments.txt
+            adj_args=(--adjust-file adjustments.txt)
+          fi
+
+          # One run: text report to stdout (for the issue) + HTML page to a
+          # file (for Pages). chaos.py exits non-zero if the week isn't fully
+          # charted yet, in which case nothing is published.
+          mkdir -p "public/chaos/$SEASON"
           set +e
           .venv/bin/python chaos.py \
-            --season "${{ steps.target.outputs.season }}" \
-            --week "${{ steps.target.outputs.week }}" \
-            --flag-candidates | tee out.txt
+            --season "$SEASON" --week "$WEEK" --flag-candidates \
+            "${adj_args[@]}" \
+            --html-out "public/chaos/$SEASON/week-$WEEK.html" | tee out.txt
           code=${PIPESTATUS[0]}
           set -e
 
           if [ "$code" -ne 0 ]; then
-            echo "Week not fully charted yet (chaos.py exit $code); no issue created."
+            echo "Week not fully charted yet (chaos.py exit $code); nothing published."
+            echo "published=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          gh issue create \
-            --title "${{ steps.target.outputs.title }}" \
-            --body-file out.txt \
+          gh issue create --title "$TITLE" --body-file out.txt \
             --assignee kellermartin13
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - name: Publish HTML to GitHub Pages
+        if: steps.score.outputs.published == 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          keep_files: true
+          commit_message: "pages: chaos ${{ steps.target.outputs.season }} week ${{ steps.target.outputs.week }}"
+
+      - name: Pages URL to summary
+        if: steps.score.outputs.published == 'true'
+        env:
+          SEASON: ${{ steps.target.outputs.season }}
+          WEEK: ${{ steps.target.outputs.week }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          repo="${REPO#*/}"
+          url="https://${OWNER}.github.io/${repo}/chaos/${SEASON}/week-${WEEK}.html"
+          echo "Chaos page: ${url}"
+          echo "::notice title=Chaos page::${url}"
+          {
+            echo "## Chaos — ${SEASON} Week ${WEEK}"
+            echo ""
+            echo "**Page:** ${url}"
+          } >> "$GITHUB_STEP_SUMMARY"
