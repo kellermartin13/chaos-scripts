@@ -723,6 +723,43 @@ def _wk_key(season, week):
     return (int(season), int(week))
 
 
+# Cutoff for classifying a week-1 trade as offseason vs. a real in-season
+# Week 1 trade. NFL Week 1 kicks off in early September, so a week-1 trade
+# whose status_updated is before Sept 1 of the season is an offseason trade
+# (Sleeper files all offseason trades under the week-1 leg).
+_SEASON_START_MONTH = 9
+_SEASON_START_DAY = 1
+
+
+def is_offseason_trade(season, week, status_updated):
+    """
+    True when a trade filed under week 1 actually happened in the offseason,
+    judged by its status_updated timestamp (epoch ms). Non-week-1 trades and
+    trades without a timestamp are treated as in-season.
+    """
+
+    if int(week) != 1 or not status_updated:
+        return False
+
+    filed = datetime.fromtimestamp(int(status_updated) / 1000, tz=timezone.utc)
+    cutoff = datetime(
+        int(season), _SEASON_START_MONTH, _SEASON_START_DAY, tzinfo=timezone.utc
+    )
+    return filed < cutoff
+
+
+def format_trade_when(review):
+    """
+    Display label for when a trade was filed: "2023 offseason" for offseason
+    trades (filed under week 1 before the season started), else "2023 wk5".
+    """
+
+    season, week = review["season"], review["week"]
+    if is_offseason_trade(season, week, review.get("status_updated")):
+        return f"{season} offseason"
+    return f"{season} wk{week}"
+
+
 # =============================================================================
 # Asset ownership timeline (dynasty: assets keep changing hands)
 # =============================================================================
@@ -787,7 +824,9 @@ def build_ownership_timeline(
     return dict(events)
 
 
-def hold_window_end(timeline, player_id, roster_id, start_season, start_week):
+def hold_window_end(
+    timeline, player_id, roster_id, start_season, start_week, start_seq=0
+):
     """
     When did `roster_id` give up `player_id` after acquiring him at
     (start_season, start_week)?
@@ -797,12 +836,21 @@ def hold_window_end(timeline, player_id, roster_id, start_season, start_week):
     *different* roster (a re-trade or waiver claim elsewhere). Returns None when
     the player never left, i.e. the receiving team still holds him and the
     trade's window runs to the present.
+
+    start_seq is the acquiring transaction's status_updated. It's required to
+    order events *within the same filed week* — Sleeper stamps every offseason
+    trade as week 1, so a player traded twice in the offseason has both hops in
+    (season, 1). Without the sequence, an intermediate owner's window can't be
+    bounded (it looks "still held") and their production is double-counted; the
+    final owner can likewise be wrongly bounded by an earlier same-week add.
     """
 
-    start_key = _wk_key(start_season, start_week)
+    start_full = (_wk_key(start_season, start_week), start_seq)
 
     for event in timeline.get(player_id, []):
-        if event["key"][0] <= start_key:
+        # Skip everything up to and including the acquiring transaction, in
+        # full (season, week, status_updated) order.
+        if event["key"] <= start_full:
             continue
 
         left_roster = (
@@ -1670,7 +1718,7 @@ def review_asset_par(asset, trade, roster_id, ctx):
 
     end = hold_window_end(
         ctx["timeline"], asset["player_id"], roster_id,
-        trade["season"], trade["week"],
+        trade["season"], trade["week"], trade.get("status_updated") or 0,
     )
     end_season, end_week = end if end else (None, None)
     base["end"] = end
@@ -1878,7 +1926,7 @@ def _par_takeaway(review, winner):
 def render_par_highlight(rank, review):
     lines = []
     tag = (review["lopsided"] or "notable").upper()
-    when = f"{review['season']} (filed wk {review['week']})"
+    when = format_trade_when(review)
     lines.append(
         f"\n#{rank}  [T{review['trade_no']}]  {tag} · {when} · "
         f"{review['seasons_elapsed']} seasons elapsed"
@@ -1925,7 +1973,7 @@ def render_par_index_entry(review):
     highlight treatment.
     """
 
-    when = f"{review['season']} wk{review['week']}"
+    when = format_trade_when(review)
     winner = review["winner_roster"]
 
     bits = [f"T{review['trade_no']:<4}{when}"]
@@ -2191,7 +2239,7 @@ def _html_side(roster_id, side, winner, margin, detailed):
 
 
 def _html_trade_card(review, rank=None, detailed=False, anchor=False):
-    when = f'{review["season"]} wk{review["week"]}'
+    when = format_trade_when(review)
     winner = review["winner_roster"]
     margin = review["margin"]
 
