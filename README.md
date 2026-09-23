@@ -107,6 +107,7 @@ nflverse.
 | `--band N`       | Ranks past the last starter that define replacement level (default 3).             |
 | `--unfloored`    | Use literal WAR (below-replacement weeks penalize) instead of the floored default. |
 | `--raw-points`   | Print the legacy points-only report instead of the PAR report.                     |
+| `--html`         | Emit the report as a self-contained HTML page (for GitHub Pages) instead of text.  |
 
 > **Status:** PAR is the primary metric, but verdicts have not been validated
 > end-to-end against known-good league results — spot-check against your league
@@ -121,19 +122,34 @@ trigger only, no schedule**. From the repo's **Actions** tab, pick *Dynasty
 Trade Review* → *Run workflow*, enter a **league ID** (and optionally season,
 highlight count, `unfloored`, or `raw_points`), and run.
 
-Output lands in two places:
+Output lands in three places:
 
-- **Job Summary** on the run page — the full report, rendered inline so you can
-  read it in the browser without downloading anything.
-- **Artifact** (`trade-review-report`) — the same report as a downloadable
-  `.txt`.
+- **GitHub Pages** — the report is published as an HTML page at
+  `https://<owner>.github.io/<repo>/leagues/<league-id>.html`. Each league gets
+  its **own stable URL** (publishing uses `keep_files: true`, so leagues don't
+  overwrite each other), so you can pin that link in each league's chat. The
+  Pages URL is also printed at the top of the Job Summary.
+- **Job Summary** on the run page — the full text report, inline.
+- **Artifact** (`trade-review-report`) — the report `.txt` plus the generated
+  HTML.
+
+**One-time setup:** in **Settings → Pages**, set *Source* to *Deploy from a
+branch* → **`gh-pages`** / **`/ (root)`**. (The first workflow run creates the
+`gh-pages` branch.) Publishing uses the built-in `GITHUB_TOKEN` — no PAT
+needed, since `gh-pages` is in the same repo.
 
 The job needs only the public Sleeper API and `requests` (no nflverse/pandas),
 so it finishes quickly. League-ID and other inputs are passed to the script via
 environment variables — never interpolated into the shell — so an arbitrary
-input can't inject commands. If you'd rather have runs post a GitHub **Issue**
-(like the weekly Chaos workflow, which emails repo watchers), that's a small
-swap of the summary/artifact steps for a `gh issue create --body-file`.
+input can't inject commands. A `concurrency` group serializes runs so multiple
+leagues never publish (or hit Sleeper) at the same time.
+
+**Rate limits.** Sleeper asks callers to stay under ~1000 requests/minute. A
+single review makes a few hundred **sequential** calls over its runtime, well
+under that. To keep it there: the report shares one pass of the transaction log
+(trade collection + ownership timeline) and one weekly-stats cache, and the
+~16 MB player map is cached between runs (see below) — so the two largest call
+buckets aren't fetched twice. Don't parallelize the fetchers.
 
 ## Setup
 
@@ -148,17 +164,24 @@ This creates a `.venv` and installs pinned dependencies. `nfl_data_py` over-pins
 installs compatible pinned versions first and adds `nfl_data_py` with
 `--no-deps` (see `requirements.txt`).
 
-### Player-map cache (Redis)
+### Player-map cache (Redis or file)
 
 Both scripts fetch Sleeper's NFL player map (`/players/nfl`) — a large (~16 MB)
-payload that changes at most once a day. `sleeper_cache.py` caches it in a local
-Redis (key `sleeper:players:nfl`, 24h TTL) so repeated runs don't refetch it,
-and `chaos.py` and `trade_review.py` **share the same cached copy**.
+payload that changes at most once a day. `sleeper_cache.py` caches it two ways,
+and `chaos.py` and `trade_review.py` **share the same cached copy**:
 
-Caching is best-effort: if no Redis server is reachable (or the `redis` package
-isn't installed) the scripts transparently fall back to a live fetch. To enable
-it, run a local Redis (default `redis://localhost:6379/0`, override with the
-`REDIS_URL` env var):
+- **Redis** (local dev): cached under key `sleeper:players:nfl` with a 24h TTL.
+- **File** (CI / no Redis): set `SLEEPER_PLAYERS_FILE` to a JSON path and the
+  map is read from / written to that file (24h freshness check). The trade-
+  review Action points this at `.sleeper-cache/players-nfl.json` and persists
+  it with `actions/cache` keyed by UTC date, so repeated runs across leagues
+  don't re-fetch the map.
+
+Lookup order is Redis → file → live fetch; every layer is best-effort, so with
+neither cache available the scripts transparently fall back to a live fetch.
+
+To enable Redis locally, run one (default `redis://localhost:6379/0`, override
+with the `REDIS_URL` env var):
 
 ```bash
 brew install redis && brew services start redis
