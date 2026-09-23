@@ -1765,3 +1765,59 @@ class TestFlagChainedTrades:
         out = tr._par_takeaway(reviews[0], 2)
 
         assert "Chained trade" in out and "James Cook" in out and "see T9" in out
+
+
+# ---------------------------------------------------------------------------
+# Trades-derived ownership (robust bound, independent of drops/timeline fetch)
+# ---------------------------------------------------------------------------
+
+class TestTradeDerivedOwnership:
+
+    @pytest.fixture
+    def trades(self):
+        # Cook acquired by roster 10 then flipped to roster 1, both 2023 wk1,
+        # NO drops recorded — the real NFL-Talk-Dynasty shape.
+        return [
+            {"season": "2023", "week": 1, "status_updated": 100,
+             "adds": {"cook": 10}},
+            {"season": "2023", "week": 1, "status_updated": 200,
+             "adds": {"cook": 1}},
+        ]
+
+    def test_first_owner_bounded_at_next_trade(self, trades):
+        ownership = tr.build_trade_ownership(trades)
+
+        assert tr.trade_hold_end(ownership, "cook", "2023", 1, 100) == (
+            "2023", 1
+        )
+
+    def test_final_owner_still_held(self, trades):
+        ownership = tr.build_trade_ownership(trades)
+
+        assert tr.trade_hold_end(ownership, "cook", "2023", 1, 200) is None
+
+    def test_bounds_without_any_timeline_or_drops(self, trades):
+        # The whole point: the bound needs only the trades — no ownership
+        # timeline, no drops. This is what fixes the Cook double-count even
+        # when the transactions endpoint returns an incomplete timeline.
+        ownership = tr.build_trade_ownership(trades)
+
+        assert tr.trade_hold_end(ownership, "cook", "2023", 1, 100) is not None
+
+    def test_events_sorted_chronologically(self, trades):
+        ownership = tr.build_trade_ownership(list(reversed(trades)))
+
+        rosters = [e["roster_id"] for e in ownership["cook"]]
+        assert rosters == [10, 1]
+
+
+class TestEarliestEnd:
+
+    def test_picks_earlier_of_two(self):
+        assert tr._earliest_end(("2024", 1), ("2023", 5)) == ("2023", 5)
+
+    def test_ignores_none(self):
+        assert tr._earliest_end(None, ("2023", 5)) == ("2023", 5)
+
+    def test_all_none_is_none(self):
+        assert tr._earliest_end(None, None) is None

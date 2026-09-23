@@ -866,6 +866,136 @@ def hold_window_end(
     return None
 
 
+def build_trade_ownership(trades):
+    """
+    Per-player acquisition timeline derived from the TRADES themselves (their
+    `adds`), ordered chronologically by status_updated.
+
+    This is the same data the report displays, so it can't diverge from what's
+    shown — unlike the separately-fetched ownership timeline, it needs no
+    `drops` and doesn't depend on the transactions endpoint being complete or
+    consistent. It's the robust source for bounding a re-traded asset.
+
+    Returns {player_id: [{"key": ((season_int, week), seq), "season", "week",
+    "roster_id"}, ...]} sorted ascending.
+    """
+
+    acquisitions = defaultdict(list)
+
+    for trade in trades:
+        seq = trade.get("status_updated") or 0
+        for player_id, roster_id in (trade.get("adds") or {}).items():
+            acquisitions[player_id].append(
+                {
+                    "key": (_wk_key(trade["season"], trade["week"]), seq),
+                    "season": trade["season"],
+                    "week": trade["week"],
+                    "roster_id": roster_id,
+                }
+            )
+
+    for events in acquisitions.values():
+        events.sort(key=lambda e: e["key"])
+
+    return dict(acquisitions)
+
+
+def trade_hold_end(trade_ownership, player_id, start_season, start_week, start_seq):
+    """
+    End (season, week) of a received asset's hold, from the *next trade that
+    moved the player* after the acquiring trade — a player can only be traded
+    by his current owner, so the next trade-acquisition marks when this owner
+    gave him up. Returns None when no later trade moved him (still held via
+    trades). Independent of drops and of the ownership-timeline fetch.
+    """
+
+    start_full = (_wk_key(start_season, start_week), start_seq)
+
+    for event in trade_ownership.get(player_id, []):
+        if event["key"] <= start_full:
+            continue
+        return event["season"], event["week"]
+
+    return None
+
+
+def _earliest_end(*ends):
+    """The most-constraining (earliest) of several (season, week) ends, or None
+    when all are None. Bounds a hold at whichever exit came first."""
+
+    present = [e for e in ends if e is not None]
+    if not present:
+        return None
+    return min(present, key=lambda e: _wk_key(e[0], e[1]))
+
+
+def _debug_player_ownership(spec, ctx, trades):
+    """
+    Print an ownership diagnosis for one player to stderr: every trade that
+    moved him, the ownership-timeline events, and the computed hold-window end
+    per acquiring trade (trade-derived, timeline, combined). For pinning
+    double-counts from a live (non-throttled) run.
+    """
+
+    players = ctx.get("players") or {}
+    spec_s = str(spec).strip()
+
+    if spec_s.isdigit() and spec_s in players:
+        player_id = spec_s
+    else:
+        player_id = next(
+            (pid for pid, p in players.items()
+             if (p.get("full_name") or "").strip().lower() == spec_s.lower()),
+            None,
+        )
+
+    def log(message):
+        print(message, file=sys.stderr)
+
+    log("=" * 72)
+    if player_id is None:
+        log(f"DEBUG: no player matched {spec!r}")
+        log("=" * 72)
+        return
+
+    name = (players.get(player_id) or {}).get("full_name") or player_id
+    log(f"DEBUG ownership for {name} (id {player_id})")
+
+    acqs = (ctx.get("trade_ownership") or {}).get(player_id, [])
+    log("\nTrades that moved him (adds), chronological:")
+    if not acqs:
+        log("  (none found in the collected trades)")
+    for event in acqs:
+        log(f"  {event['season']} wk{event['week']} seq={event['key'][1]} "
+            f"-> roster {event['roster_id']}")
+
+    timeline = (ctx.get("timeline") or {}).get(player_id, [])
+    log("\nOwnership-timeline events (adds/drops from all transactions):")
+    if not timeline:
+        log("  (none — transactions endpoint returned no events for him)")
+    for event in timeline:
+        log(f"  {event['season']} wk{event['week']} seq={event['key'][1]} "
+            f"{event['event']} roster {event['roster_id']}")
+
+    log("\nComputed hold-window end per acquiring trade:")
+    for event in acqs:
+        seq = event["key"][1]
+        roster = event["roster_id"]
+        t_end = trade_hold_end(
+            ctx.get("trade_ownership") or {}, player_id,
+            event["season"], event["week"], seq,
+        )
+        w_end = hold_window_end(
+            ctx.get("timeline") or {}, player_id, roster,
+            event["season"], event["week"], seq,
+        )
+        combined = _earliest_end(t_end, w_end)
+        held = "  (STILL HELD)" if combined is None else ""
+        log(f"  roster {roster} @ {event['season']} wk{event['week']}: "
+            f"trade_end={t_end} timeline_end={w_end} -> end={combined}{held}")
+    log("=" * 72)
+
+
 def build_replacement_ranks(league, flex_eligibility=FLEX_ELIGIBILITY):
     """
     Leaguewide starter demand per position = the replacement rank.
@@ -1716,10 +1846,22 @@ def review_asset_par(asset, trade, roster_id, ctx):
         )
         return base
 
-    end = hold_window_end(
-        ctx["timeline"], asset["player_id"], roster_id,
-        trade["season"], trade["week"], trade.get("status_updated") or 0,
+    start_seq = trade.get("status_updated") or 0
+
+    # Bound the hold window at the earliest exit we can establish. The
+    # trades-derived bound (next trade that moved the player) is robust — it
+    # comes from the same trades the report shows and needs no drops. The
+    # timeline bound additionally catches waiver/drop exits when those are
+    # recorded. Whichever comes first wins.
+    trade_end = trade_hold_end(
+        ctx.get("trade_ownership") or {}, asset["player_id"],
+        trade["season"], trade["week"], start_seq,
     )
+    timeline_end = hold_window_end(
+        ctx["timeline"], asset["player_id"], roster_id,
+        trade["season"], trade["week"], start_seq,
+    )
+    end = _earliest_end(trade_end, timeline_end)
     end_season, end_week = end if end else (None, None)
     base["end"] = end
 
@@ -2559,6 +2701,17 @@ def main():
             "HTML."
         ),
     )
+    parser.add_argument(
+        "--debug-player",
+        default=None,
+        metavar="ID_OR_NAME",
+        help=(
+            "Print an ownership diagnosis for one player (Sleeper id or full "
+            "name) to stderr: every trade that moved him, the ownership "
+            "timeline events, and the computed hold-window end per trade. For "
+            "debugging double-counts."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -2633,9 +2786,15 @@ def main():
 
     stats_cache = WeeklyStatsCache()
 
-    trades = collect_trades(chain, fetch=txn_fetch)
+    # Ownership is derived from ALL trades (a re-trade in a later season must
+    # still bound an earlier acquisition), even when --season filters which
+    # trades are reviewed.
+    all_trades = collect_trades(chain, fetch=txn_fetch)
+    trade_ownership = build_trade_ownership(all_trades)
+
+    trades = all_trades
     if args.season:
-        trades = [t for t in trades if t["season"] == str(args.season)]
+        trades = [t for t in all_trades if t["season"] == str(args.season)]
 
     ctx = {
         "chain_index": chain_index,
@@ -2644,12 +2803,16 @@ def main():
         "team_names": team_names_by_season,
         "stats_cache": stats_cache,
         "timeline": build_ownership_timeline(chain, fetch=txn_fetch),
+        "trade_ownership": trade_ownership,
         "floor": not args.unfloored,
         "baseline_cache": ReplacementBaselineCache(
             chain_index, players, stats_cache,
             build_replacement_ranks_by_season(chain_index), band=args.band,
         ),
     }
+
+    if args.debug_player:
+        _debug_player_ownership(args.debug_player, ctx, all_trades)
 
     reviews = [build_par_review(trade, ctx) for trade in trades]
     attach_lineage(reviews, trades)

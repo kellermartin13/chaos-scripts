@@ -8,12 +8,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Trade review — ownership bounds derived from the trades themselves.**
+  Hold windows are now bounded using the same trade list the report displays
+  (a received player is held until the next trade that moved him), instead of
+  relying solely on a separately-fetched ownership timeline. This is robust
+  when a league records no `drops` (so a re-trade's `add` is the only exit
+  signal) and immune to transaction-endpoint inconsistency — a player can be
+  "still held" by at most one team, eliminating cross-trade double-counts. The
+  ownership timeline is still consulted for waiver/drop exits; the earliest
+  exit wins.
 - **Trade review — same-week re-trades no longer double-count.** A player
   traded more than once within the same filed week (e.g. multiple offseason
   trades, which Sleeper all stamps as week 1) was credited to *every* trade,
   appearing "still held" on each. `hold_window_end` now orders same-week events
   by `status_updated`, so an intermediate owner's production window closes when
   they flipped the asset and only the true holder keeps the credit.
+
+### Added
+
+- **Trade review — `--debug-player ID_OR_NAME`.** Prints an ownership
+  diagnosis for one player to stderr (every trade that moved him, the timeline
+  events, and the computed hold-window end per trade) for pinning double-counts
+  from a live run.
 
 ### Changed
 
