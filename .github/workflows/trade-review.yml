@@ -1,0 +1,99 @@
+name: Dynasty Trade Review
+
+# Manual, on-demand only (no schedule). Trigger from the Actions tab, enter a
+# league ID, and read the PAR report in the run's Job Summary (also uploaded as
+# a downloadable .txt artifact). trade_review.py needs only the public Sleeper
+# API and the `requests` package — no nflverse/pandas, so this stays fast.
+
+on:
+  workflow_dispatch:
+    inputs:
+      league_id:
+        description: 'Current-season Sleeper league ID (history is walked backward from it)'
+        required: true
+        type: string
+      season:
+        description: 'Only review this season (e.g. 2025). Blank = all seasons.'
+        required: false
+        type: string
+      top:
+        description: 'Number of highlight trades to show'
+        required: false
+        default: '12'
+        type: string
+      unfloored:
+        description: 'Literal WAR (below-replacement weeks penalize) instead of floored default'
+        required: false
+        default: false
+        type: boolean
+      raw_points:
+        description: 'Legacy points-only report instead of PAR'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  trade-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        # trade_review.py imports only `requests` (redis is optional and falls
+        # back to a live fetch when no server is reachable, which is the case in
+        # CI). Pinned to match requirements.txt.
+        run: pip install "requests==2.34.2"
+
+      - name: Run trade review
+        id: run
+        # Inputs are passed via env (never interpolated into the shell) to avoid
+        # script injection, and assembled into a quoted args array.
+        env:
+          LEAGUE_ID: ${{ inputs.league_id }}
+          SEASON: ${{ inputs.season }}
+          TOP: ${{ inputs.top }}
+          UNFLOORED: ${{ inputs.unfloored }}
+          RAW_POINTS: ${{ inputs.raw_points }}
+        run: |
+          set -uo pipefail
+          args=(--league-id "$LEAGUE_ID" --top "$TOP")
+          if [ -n "$SEASON" ]; then args+=(--season "$SEASON"); fi
+          if [ "$UNFLOORED" = "true" ]; then args+=(--unfloored); fi
+          if [ "$RAW_POINTS" = "true" ]; then args+=(--raw-points); fi
+
+          python trade_review.py "${args[@]}" | tee report.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            echo "trade_review.py exited $code" >&2
+            exit "$code"
+          fi
+
+      - name: Publish report to job summary
+        if: always()
+        env:
+          LEAGUE_ID: ${{ inputs.league_id }}
+          SEASON: ${{ inputs.season }}
+        run: |
+          {
+            echo "## Dynasty Trade Review"
+            echo "League \`${LEAGUE_ID}\`${SEASON:+ · season ${SEASON}}"
+            echo ""
+            echo '```text'
+            if [ -f report.txt ]; then cat report.txt; else echo "(no output — run step failed)"; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trade-review-report
+          path: report.txt
+          if-no-files-found: warn
