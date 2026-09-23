@@ -17,6 +17,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Trade review — pass-through trades aren't mislabeled heists.** When the
+  losing side flipped a received asset onward (the asset carries a lineage
+  link), the trade is tagged `CHAINED` instead of `LOPSIDED`/`HEIST` — a side
+  that acquired a stud and immediately re-traded him wasn't fleeced, and its
+  single-trade PAR understates the return. PAR numbers are unchanged; the ↳
+  links show where the value went.
 - **Trade review — offseason trades are labeled "offseason".** Trades filed
   under week 1 before the season kicks off now display as `<season> offseason`
   instead of `<season> wk1`, based on the trade's timestamp. Scoring is
