@@ -1611,6 +1611,29 @@ class TestHoldWindowSameWeek:
             "2023", 1
         )
 
+    def test_bounds_via_add_when_drops_are_omitted(self):
+        # Real-world shape (NFL-Talk-Dynasty): a re-traded player is recorded
+        # only in the receiving side's `adds`; the sender records NO `drop`.
+        # The later add to a different roster must still bound the first owner.
+        chain = [{"league_id": "L", "season": "2023"}]
+        txns = {
+            ("L", 1): [
+                {"status": "complete", "status_updated": 111,
+                 "adds": {"cook": 10}, "drops": {}},   # -> roster 10 (first)
+                {"status": "complete", "status_updated": 222,
+                 "adds": {"cook": 1}, "drops": {}},     # -> roster 1  (second)
+            ],
+        }
+        timeline = tr.build_ownership_timeline(
+            chain, fetch=lambda lid, wk: txns.get((lid, wk), []),
+            weeks=range(1, 3),
+        )
+
+        assert tr.hold_window_end(timeline, "cook", 10, "2023", 1, 111) == (
+            "2023", 1
+        )
+        assert tr.hold_window_end(timeline, "cook", 1, "2023", 1, 222) is None
+
 
 # ---------------------------------------------------------------------------
 # Offseason trade label
