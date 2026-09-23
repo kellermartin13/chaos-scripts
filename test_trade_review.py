@@ -861,3 +861,505 @@ class TestBuildAllReviews:
         )
 
         assert [r["transaction_id"] for r in reviews] == ["t2026"]
+
+
+# ---------------------------------------------------------------------------
+# build_replacement_ranks (WAR-style: leaguewide starter demand per position)
+# ---------------------------------------------------------------------------
+
+class TestBuildReplacementRanks:
+
+    @pytest.fixture
+    def league(self):
+        return {
+            "total_rosters": 10,
+            "roster_positions": [
+                "QB", "RB", "RB", "WR", "WR", "WR", "TE",
+                "FLEX", "K", "DEF", "BN", "BN",
+            ],
+        }
+
+    def test_dedicated_slots_scaled_by_teams(self, league):
+        ranks = tr.build_replacement_ranks(league)
+
+        assert ranks["QB"] == pytest.approx(10.0)  # 1 slot * 10 teams
+
+    def test_flex_demand_spread_across_eligible_positions(self, league):
+        ranks = tr.build_replacement_ranks(league)
+
+        # RB: (2 dedicated + 1/3 flex) * 10 = 23.333...
+        assert ranks["RB"] == pytest.approx(23.3333, abs=1e-3)
+
+    def test_bench_slots_create_no_demand(self, league):
+        ranks = tr.build_replacement_ranks(league)
+
+        # WR: (3 dedicated + 1/3 flex) * 10 = 33.333...; BN never counted.
+        assert ranks["WR"] == pytest.approx(33.3333, abs=1e-3)
+
+    def test_super_flex_adds_qb_share(self):
+        league = {
+            "total_rosters": 12,
+            "roster_positions": ["QB", "SUPER_FLEX"],
+        }
+
+        ranks = tr.build_replacement_ranks(league)
+
+        # QB: (1 dedicated + 1/4 superflex) * 12 = 15.0
+        assert ranks["QB"] == pytest.approx(15.0)
+
+    def test_missing_team_count_yields_zero(self):
+        ranks = tr.build_replacement_ranks({"roster_positions": ["QB"]})
+
+        assert ranks["QB"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# ReplacementBaselineCache
+# ---------------------------------------------------------------------------
+
+class TestReplacementBaselineCache:
+
+    @pytest.fixture
+    def chain_index(self):
+        return {"scoring": {"2025": {"rec": 1.0}}}
+
+    @pytest.fixture
+    def players(self):
+        return {
+            "wr1": {"position": "WR"},
+            "wr2": {"position": "WR"},
+            "wr3": {"position": "WR"},
+            "wr4": {"position": "WR"},
+            "te1": {"position": "TE"},
+        }
+
+    @pytest.fixture
+    def stats(self):
+        return {
+            ("2025", 1): {
+                "wr1": {"rec": 10},
+                "wr2": {"rec": 8},
+                "wr3": {"rec": 6},
+                "wr4": {"rec": 4},
+                "te1": {"rec": 9},
+            },
+        }
+
+    @pytest.fixture
+    def cache_factory(self, chain_index, players, stats):
+        def make(ranks, band=tr.DEFAULT_REPLACEMENT_BAND):
+            stats_cache = tr.WeeklyStatsCache(
+                fetch=lambda season, week: stats.get((str(season), week), {})
+            )
+            return tr.ReplacementBaselineCache(
+                chain_index, players, stats_cache, ranks, band=band
+            )
+        return make
+
+    def test_single_rank_band_reads_replacement_player(self, cache_factory):
+        # 2 WR starters leaguewide -> replacement is rank index 2 (0-based) = 6.
+        cache = cache_factory({"2025": {"WR": 2}}, band=1)
+
+        assert cache.get("2025", 1)["WR"] == pytest.approx(6.0)
+
+    def test_band_averages_multiple_ranks(self, cache_factory):
+        # 2 starters, band 2 -> mean of ranks [2,3] = (6 + 4) / 2 = 5.
+        cache = cache_factory({"2025": {"WR": 2}}, band=2)
+
+        assert cache.get("2025", 1)["WR"] == pytest.approx(5.0)
+
+    def test_zero_demand_position_has_zero_baseline(self, cache_factory):
+        # TE not started (rank 0) -> baseline 0.0 even though a TE scored.
+        cache = cache_factory({"2025": {"WR": 2, "TE": 0}}, band=1)
+
+        assert cache.get("2025", 1)["TE"] == pytest.approx(0.0)
+
+    def test_rank_beyond_slate_depth_is_zero(self, cache_factory):
+        # Only 4 WRs exist; rank 5 has no one -> replacement is effectively 0.
+        cache = cache_factory({"2025": {"WR": 5}}, band=1)
+
+        assert cache.get("2025", 1)["WR"] == pytest.approx(0.0)
+
+    def test_result_is_memoized(self, cache_factory):
+        cache = cache_factory({"2025": {"WR": 2}}, band=1)
+
+        assert cache.get("2025", 1) is cache.get("2025", 1)
+
+
+# ---------------------------------------------------------------------------
+# compute_par_since
+# ---------------------------------------------------------------------------
+
+class StubBaselines:
+    """Minimal baseline_cache: (season, week) -> {position: baseline_pts}."""
+
+    def __init__(self, table):
+        self._table = table
+
+    def get(self, season, week):
+        return self._table.get((str(season), week), {})
+
+
+class TestComputeParSince:
+
+    @pytest.fixture
+    def chain_index(self):
+        return {
+            "seasons": ["2025", "2026"],
+            "scoring": {"2025": {"rec": 1.0}, "2026": {"rec": 1.0}},
+        }
+
+    @pytest.fixture
+    def stats(self):
+        return {
+            ("2025", 7): {"p": {"rec": 5, "gp": 1}},
+            ("2025", 8): {"p": {"rec": 10, "gp": 1}},
+            ("2025", 9): {"p": {"rec": 3, "gp": 1}},
+            ("2026", 1): {"p": {"rec": 4, "gp": 1}},
+        }
+
+    @pytest.fixture
+    def cache(self, stats):
+        return tr.WeeklyStatsCache(
+            fetch=lambda season, week: stats.get((str(season), week), {})
+        )
+
+    def test_par_subtracts_baseline_over_window(self, chain_index, cache):
+        # Filed 2025 wk8 -> wk8, wk9 (2025) + wk1 (2026); baseline 2/wk.
+        baselines = StubBaselines(
+            {
+                ("2025", 8): {"WR": 2.0},
+                ("2025", 9): {"WR": 2.0},
+                ("2026", 1): {"WR": 2.0},
+            }
+        )
+
+        result = tr.compute_par_since(
+            "p", "WR", "2025", 8, chain_index, cache, baselines,
+            weeks=range(1, 19),
+        )
+
+        # points 10+3+4 = 17; baseline 2*3 = 6; PAR = 11.
+        assert result["par_total"] == pytest.approx(11.0)
+
+    def test_points_total_matches_raw_production(self, chain_index, cache):
+        baselines = StubBaselines({})
+
+        result = tr.compute_par_since(
+            "p", "WR", "2025", 8, chain_index, cache, baselines,
+            weeks=range(1, 19),
+        )
+
+        assert result["points_total"] == pytest.approx(17.0)
+
+    def test_missing_baseline_defaults_to_zero(self, chain_index, cache):
+        # No baseline entries -> PAR equals raw points.
+        baselines = StubBaselines({})
+
+        result = tr.compute_par_since(
+            "p", "WR", "2025", 8, chain_index, cache, baselines,
+            weeks=range(1, 19),
+        )
+
+        assert result["par_total"] == pytest.approx(17.0)
+
+    def test_none_position_passes_points_through(self, chain_index, cache):
+        # Unknown position can't match a baseline -> PAR == points.
+        baselines = StubBaselines({("2025", 8): {"WR": 2.0}})
+
+        result = tr.compute_par_since(
+            "p", None, "2025", 8, chain_index, cache, baselines,
+            weeks=range(1, 19),
+        )
+
+        assert result["par_total"] == pytest.approx(17.0)
+
+    def test_counts_games_played(self, chain_index, cache):
+        result = tr.compute_par_since(
+            "p", "WR", "2025", 8, chain_index, cache, StubBaselines({}),
+            weeks=range(1, 19),
+        )
+
+        assert result["games"] == 3
+
+    def test_end_bound_excludes_weeks_at_or_after(self, chain_index, cache):
+        # Cap at 2026 wk1 -> only 2025 wk8, wk9 count (2026 wk1 excluded).
+        result = tr.compute_par_since(
+            "p", "WR", "2025", 8, chain_index, cache, StubBaselines({}),
+            weeks=range(1, 19), end_season="2026", end_week=1,
+        )
+
+        assert result["points_total"] == pytest.approx(13.0)  # 10 + 3
+
+    def test_floor_clamps_below_replacement_weeks(self, chain_index, cache):
+        # Baseline above the wk9 (3 pts) line -> that week floors at 0.
+        baselines = StubBaselines(
+            {
+                ("2025", 8): {"WR": 2.0},   # 10 -> +8
+                ("2025", 9): {"WR": 5.0},   # 3  -> -2 -> floored 0
+                ("2026", 1): {"WR": 2.0},   # 4  -> +2
+            }
+        )
+
+        result = tr.compute_par_since(
+            "p", "WR", "2025", 8, chain_index, cache, baselines,
+            weeks=range(1, 19), floor_weekly=True,
+        )
+
+        # 8 + 0 + 2 = 10 (vs 8 - 2 + 2 = 8 unfloored).
+        assert result["par_total"] == pytest.approx(10.0)
+
+    def test_par_per_game_divides_by_games(self, chain_index, cache):
+        baselines = StubBaselines({})
+
+        result = tr.compute_par_since(
+            "p", "WR", "2025", 8, chain_index, cache, baselines,
+            weeks=range(1, 19),
+        )
+
+        # par_total 17 over 3 games, rounded to 2 dp.
+        assert result["par_per_game"] == pytest.approx(5.67)
+
+
+# ---------------------------------------------------------------------------
+# score_asset_par
+# ---------------------------------------------------------------------------
+
+class TestScoreAssetPar:
+
+    @pytest.fixture
+    def chain_index(self):
+        return {"seasons": ["2025"], "scoring": {"2025": {"rec": 1.0}}}
+
+    @pytest.fixture
+    def cache(self):
+        stats = {("2025", 5): {"p": {"rec": 12, "gp": 1}}}
+        return tr.WeeklyStatsCache(
+            fetch=lambda season, week: stats.get((str(season), week), {})
+        )
+
+    def test_resolved_asset_gets_par_dict(self, chain_index, cache):
+        asset = {"resolved": True, "player_id": "p", "position": "WR"}
+        baselines = StubBaselines({("2025", 5): {"WR": 2.0}})
+
+        scored = tr.score_asset_par(
+            asset, {"season": "2025", "week": 5}, chain_index, cache, baselines
+        )
+
+        assert scored["par"]["par_total"] == pytest.approx(10.0)
+
+    def test_unresolved_asset_carries_no_par(self, chain_index, cache):
+        asset = {"resolved": False, "player_id": None, "position": None}
+
+        scored = tr.score_asset_par(
+            asset, {"season": "2025", "week": 5}, chain_index, cache,
+            StubBaselines({}),
+        )
+
+        assert scored["par"] is None
+
+
+# ---------------------------------------------------------------------------
+# compute_production_since — end bound
+# ---------------------------------------------------------------------------
+
+class TestProductionEndBound:
+
+    @pytest.fixture
+    def chain_index(self):
+        return {
+            "seasons": ["2025", "2026"],
+            "scoring": {"2025": {"rec": 1.0}, "2026": {"rec": 1.0}},
+        }
+
+    @pytest.fixture
+    def cache(self):
+        stats = {
+            ("2025", 8): {"p": {"rec": 10, "gp": 1}},
+            ("2025", 9): {"p": {"rec": 3, "gp": 1}},
+            ("2026", 1): {"p": {"rec": 4, "gp": 1}},
+        }
+        return tr.WeeklyStatsCache(
+            fetch=lambda season, week: stats.get((str(season), week), {})
+        )
+
+    def test_end_bound_stops_counting(self, chain_index, cache):
+        # Held only through 2025 wk9 (exclusive) -> just wk8.
+        result = tr.compute_production_since(
+            "p", "2025", 8, chain_index, cache,
+            weeks=range(1, 19), end_season="2025", end_week=9,
+        )
+
+        assert result["total"] == pytest.approx(10.0)
+
+    def test_no_end_bound_runs_to_present(self, chain_index, cache):
+        result = tr.compute_production_since(
+            "p", "2025", 8, chain_index, cache, weeks=range(1, 19)
+        )
+
+        assert result["total"] == pytest.approx(17.0)  # 10 + 3 + 4
+
+
+# ---------------------------------------------------------------------------
+# build_ownership_timeline / hold_window_end (dynasty: assets keep moving)
+# ---------------------------------------------------------------------------
+
+class TestOwnershipTimeline:
+
+    @pytest.fixture
+    def chain(self):
+        return [
+            {"league_id": "L2026", "season": "2026"},
+            {"league_id": "L2025", "season": "2025"},
+        ]
+
+    @pytest.fixture
+    def txns(self):
+        # (league_id, week) -> [transactions]
+        return {
+            ("L2025", 1): [
+                {
+                    "status": "complete",
+                    "status_updated": 100,
+                    "adds": {"diggs": 1},
+                    "drops": {"filler": 2},
+                }
+            ],
+            ("L2025", 5): [
+                {  # re-trade: roster 1 ships Diggs to roster 2
+                    "status": "complete",
+                    "status_updated": 200,
+                    "adds": {"diggs": 2},
+                    "drops": {"diggs": 1},
+                }
+            ],
+            ("L2026", 3): [
+                {  # ignored: not complete
+                    "status": "pending",
+                    "status_updated": 300,
+                    "adds": {"diggs": 3},
+                    "drops": {},
+                }
+            ],
+        }
+
+    @pytest.fixture
+    def timeline(self, chain, txns):
+        return tr.build_ownership_timeline(
+            chain,
+            fetch=lambda lid, wk: txns.get((lid, wk), []),
+            weeks=range(1, 6),
+        )
+
+    def test_events_are_chronologically_ordered(self, timeline):
+        keys = [(e["season"], e["week"], e["event"]) for e in timeline["diggs"]]
+
+        assert keys[0] == ("2025", 1, "add")
+
+    def test_incomplete_transactions_ignored(self, timeline):
+        # The pending L2026 add must not appear.
+        assert all(e["season"] != "2026" for e in timeline["diggs"])
+
+    def test_retrade_ends_hold_window(self, timeline):
+        # Roster 1 acquired Diggs 2025 wk1, shipped him wk5.
+        end = tr.hold_window_end(timeline, "diggs", 1, "2025", 1)
+
+        assert end == ("2025", 5)
+
+    def test_new_owner_still_holds(self, timeline):
+        # Roster 2 received Diggs wk5 and never moved him.
+        end = tr.hold_window_end(timeline, "diggs", 2, "2025", 5)
+
+        assert end is None
+
+    def test_drop_ends_hold_window(self):
+        chain = [{"league_id": "L", "season": "2025"}]
+        txns = {
+            ("L", 1): [
+                {"status": "complete", "status_updated": 1,
+                 "adds": {"x": 1}, "drops": {}}
+            ],
+            ("L", 4): [
+                {"status": "complete", "status_updated": 2,
+                 "adds": {}, "drops": {"x": 1}}
+            ],
+        }
+        timeline = tr.build_ownership_timeline(
+            chain, fetch=lambda lid, wk: txns.get((lid, wk), []),
+            weeks=range(1, 6),
+        )
+
+        assert tr.hold_window_end(timeline, "x", 1, "2025", 1) == ("2025", 4)
+
+    def test_no_events_means_still_held(self, timeline):
+        assert tr.hold_window_end(timeline, "unknown", 1, "2025", 1) is None
+
+
+# ---------------------------------------------------------------------------
+# attach_lineage (link re-traded assets without summing value)
+# ---------------------------------------------------------------------------
+
+class TestAttachLineage:
+
+    @pytest.fixture
+    def scenario(self):
+        # T1 (2020): roster 1 acquires Diggs (and ships a pick).
+        # T2 (2022): roster 1 flips Diggs for Chase + a pick-player.
+        # Scrub was dropped, not traded, so its lineage ends.
+        trades = [
+            {"season": "2020", "week": 1, "drops": {"sent_pick": 1}},
+            {"season": "2022", "week": 1, "drops": {"diggs": 1}},
+        ]
+        reviews = [
+            {
+                "season": "2020", "week": 1,
+                "sides": {1: {"assets": [
+                    {"name": "Diggs", "player_id": "diggs",
+                     "end": ("2022", 1), "became": None},
+                    {"name": "Scrub", "player_id": "scrub",
+                     "end": ("2021", 5), "became": None},
+                ]}},
+            },
+            {
+                "season": "2022", "week": 1,
+                "sides": {1: {"assets": [
+                    {"name": "Ja'Marr Chase", "player_id": "chase",
+                     "end": None, "became": None},
+                    {"name": "2023 1st -> Bijan", "player_id": "bijan",
+                     "end": None, "became": None},
+                ]}},
+            },
+        ]
+        tr.attach_lineage(reviews, trades)
+        return reviews
+
+    def test_assigns_sequential_trade_numbers(self, scenario):
+        assert [r["trade_no"] for r in scenario] == [1, 2]
+
+    def test_retraded_asset_links_to_return_package(self, scenario):
+        diggs = scenario[0]["sides"][1]["assets"][0]
+
+        assert diggs["became"] == {
+            "trade_no": 2,
+            "assets": ["Ja'Marr Chase", "2023 1st -> Bijan"],
+        }
+
+    def test_dropped_asset_ends_lineage(self, scenario):
+        scrub = scenario[0]["sides"][1]["assets"][1]
+
+        assert scrub["became"] == {"dropped": True}
+
+    def test_still_held_asset_has_no_lineage(self, scenario):
+        chase = scenario[1]["sides"][1]["assets"][0]
+
+        assert chase["became"] is None
+
+    def test_lineage_line_renders_reference(self, scenario):
+        diggs = scenario[0]["sides"][1]["assets"][0]
+
+        assert "see T2" in tr._par_lineage_line(diggs)
+
+    def test_dropped_line_renders_terminal(self, scenario):
+        scrub = scenario[0]["sides"][1]["assets"][1]
+
+        assert "lineage ends" in tr._par_lineage_line(scrub)

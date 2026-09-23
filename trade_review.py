@@ -3,23 +3,29 @@
 """
 Dynasty trade review.
 
-⚠️  WORK IN PROGRESS — this tool is unfinished and not yet verified against
-known-good results. Output may be incomplete or incorrect (e.g. draft-pick
-resolution and since-trade windows are still being validated). Do not rely on
-its verdicts for league decisions yet.
-
 Walks a Sleeper dynasty league's full history (every season's league object,
-linked by previous_league_id), pulls every completed trade, and reports how the
-assets each side received have performed *since the trade* — including traded
-draft picks resolved to the players they actually became.
+linked by previous_league_id), pulls every completed trade, and grades how the
+assets each side received have performed — including traded draft picks
+resolved to the players they actually became.
+
+The headline metric is Points Above Replacement (PAR): a WAR-style measure of
+how much better than a freely-available replacement (at the same position) each
+asset produced, counted only while the receiving team actually held it, and
+floored per week so a benchable dud costs nothing. Raw league points are kept
+as a secondary sanity column. Pass --raw-points for the legacy points-only
+report.
 
 Production is scored with the league's own scoring settings (a dot product of
-each player's weekly Sleeper stat line and the league scoring_settings), so the
-"who won the trade" verdict reflects real league points, not a generic PPR line
-— it even honors quirks like TE-premium receiving.
+each player's weekly Sleeper stat line and the league scoring_settings), so
+verdicts reflect real league points, not a generic PPR line — it even honors
+quirks like TE-premium receiving.
 
 Everything comes from the public Sleeper API; no authentication and no nflverse
-dependency are required for this feature.
+dependency are required.
+
+Note: PAR is the primary metric but verdicts have not been validated end-to-end
+against known-good league results — spot-check against your league before
+leaning on them for decisions.
 """
 
 import argparse
@@ -31,11 +37,11 @@ import requests
 from sleeper_cache import cached_players
 
 
-# Printed at startup so anyone running the tool sees it is unverified.
+# Printed at startup so anyone running the tool knows verdicts are unvalidated.
 WIP_DISCLAIMER = (
-    "WORK IN PROGRESS: trade_review.py is unfinished and unverified. "
-    "Its trade verdicts may be incomplete or incorrect — do not rely on "
-    "them for league decisions yet."
+    "Note: PAR is the primary metric; verdicts are not yet validated "
+    "end-to-end against known-good league results — spot-check against your "
+    "league before relying on them."
 )
 
 
@@ -578,6 +584,8 @@ def compute_production_since(
     chain_index,
     stats_cache,
     weeks=REGULAR_SEASON_WEEKS,
+    end_season=None,
+    end_week=None,
 ):
     """
     Total league points a player has produced since a trade.
@@ -590,10 +598,15 @@ def compute_production_since(
     captures the entire season for them; an in-season trade counts from the
     week it was processed forward.
 
+    end_season/end_week, when given, cap the window (exclusive) at the point
+    the receiving team gave the asset up — a re-trade, waiver, or drop. Without
+    them the window runs to the end of the chain (the asset is still held).
+
     Returns {total, games, per_week: [{season, week, points}]}.
     """
 
     start_season = str(start_season)
+    end_key = _wk_key(end_season, end_week) if end_season is not None else None
 
     seasons = [
         season
@@ -612,6 +625,9 @@ def compute_production_since(
 
         for week in weeks:
             if week < first_week:
+                continue
+
+            if end_key is not None and _wk_key(season, week) >= end_key:
                 continue
 
             slate = stats_cache.get(season, week)
@@ -662,6 +678,387 @@ def score_asset(asset, trade, chain_index, stats_cache):
     )
 
     return {**asset, "production": production}
+
+
+# =============================================================================
+# Points above replacement (WAR-style) — additive, non-destructive
+# =============================================================================
+#
+# Raw "points since trade" says how much an asset produced. PAR says how much
+# better than a freely-available replacement at the same position, which reads
+# far more like a WAR (wins-above-replacement) number. It reuses the same
+# league-accurate per-week scoring as compute_production_since; the only new
+# ingredient is a per-week, per-position replacement baseline.
+#
+# Converting PAR -> literal "wins" needs a points-per-win divisor derived from
+# the league's matchup history; that step imports softer assumptions and is
+# intentionally left out of this prototype. PAR is the defensible core.
+
+# Positions we compute a replacement baseline for. FLEX-type slots are not
+# positions; their demand is spread across the eligible positions below.
+BASELINE_POSITIONS = ("QB", "RB", "WR", "TE", "K", "DEF")
+
+# Real positions each flex-type roster slot can be filled by. Slots not listed
+# (BN, IR, TAXI, IDP slots) create no starter demand and are ignored.
+FLEX_ELIGIBILITY = {
+    "FLEX": ("RB", "WR", "TE"),
+    "WRRB_FLEX": ("RB", "WR"),
+    "REC_FLEX": ("WR", "TE"),
+    "SUPER_FLEX": ("QB", "RB", "WR", "TE"),
+}
+
+# Replacement level is read a few ranks past the last leaguewide starter and
+# averaged over a small band, since a single rank is noisy week to week.
+DEFAULT_REPLACEMENT_BAND = 3
+
+
+def _wk_key(season, week):
+    """Chronological sort key for a (season, week) across the dynasty."""
+
+    return (int(season), int(week))
+
+
+# =============================================================================
+# Asset ownership timeline (dynasty: assets keep changing hands)
+# =============================================================================
+
+def build_ownership_timeline(
+    chain, fetch=get_transactions, weeks=REGULAR_SEASON_WEEKS
+):
+    """
+    Per-player chronological roster history across the whole dynasty.
+
+    Every completed transaction (trade, waiver, free agent) encodes `adds`
+    (player_id -> roster that gained him) and `drops` (player_id -> roster that
+    lost him). We fold them all into, per player, a time-ordered list of events:
+
+        {player_id: [{"key": (season_int, week), "season", "week",
+                      "roster_id", "event": "add"|"drop"}, ...]}
+
+    Events are ordered by (season, week) then Sleeper's status_updated, so a
+    same-week acquire-then-flip resolves in the right order. This is the basis
+    for bounding a trade's credit to the span the receiver actually held an
+    asset. fetch(league_id, week) is injectable for testing.
+    """
+
+    events = defaultdict(list)
+
+    for league in chain:
+        league_id = league["league_id"]
+        season = str(league.get("season"))
+
+        for week in weeks:
+            for txn in fetch(league_id, week) or []:
+                if txn.get("status") != "complete":
+                    continue
+
+                seq = txn.get("status_updated") or 0
+
+                for player_id, roster_id in (txn.get("adds") or {}).items():
+                    events[player_id].append(
+                        {
+                            "key": (_wk_key(season, week), seq),
+                            "season": season,
+                            "week": week,
+                            "roster_id": roster_id,
+                            "event": "add",
+                        }
+                    )
+
+                for player_id, roster_id in (txn.get("drops") or {}).items():
+                    events[player_id].append(
+                        {
+                            "key": (_wk_key(season, week), seq),
+                            "season": season,
+                            "week": week,
+                            "roster_id": roster_id,
+                            "event": "drop",
+                        }
+                    )
+
+    for player_events in events.values():
+        player_events.sort(key=lambda e: e["key"])
+
+    return dict(events)
+
+
+def hold_window_end(timeline, player_id, roster_id, start_season, start_week):
+    """
+    When did `roster_id` give up `player_id` after acquiring him at
+    (start_season, start_week)?
+
+    Returns the (end_season, end_week) of the first later event that removes
+    the player from that roster — a drop by that roster, or an add to a
+    *different* roster (a re-trade or waiver claim elsewhere). Returns None when
+    the player never left, i.e. the receiving team still holds him and the
+    trade's window runs to the present.
+    """
+
+    start_key = _wk_key(start_season, start_week)
+
+    for event in timeline.get(player_id, []):
+        if event["key"][0] <= start_key:
+            continue
+
+        left_roster = (
+            event["event"] == "drop" and event["roster_id"] == roster_id
+        )
+        moved_elsewhere = (
+            event["event"] == "add" and event["roster_id"] != roster_id
+        )
+
+        if left_roster or moved_elsewhere:
+            return event["season"], event["week"]
+
+    return None
+
+
+def build_replacement_ranks(league, flex_eligibility=FLEX_ELIGIBILITY):
+    """
+    Leaguewide starter demand per position = the replacement rank.
+
+    Counts dedicated starter slots per position from roster_positions, spreads
+    each flex slot's demand evenly across its eligible positions, then scales
+    by the number of teams. The result maps a position to how many startable
+    players the league consumes each week; the player ranked just past that
+    count is replacement level.
+
+    Returns {position: starters_leaguewide (float)} for every BASELINE_POSITION.
+    """
+
+    teams = league.get("total_rosters") or 0
+    slots = league.get("roster_positions") or []
+
+    demand = {pos: 0.0 for pos in BASELINE_POSITIONS}
+
+    for slot in slots:
+        if slot in demand:
+            demand[slot] += 1.0
+        elif slot in flex_eligibility:
+            eligible = [pos for pos in flex_eligibility[slot] if pos in demand]
+            if eligible:
+                share = 1.0 / len(eligible)
+                for pos in eligible:
+                    demand[pos] += share
+
+    return {pos: count * teams for pos, count in demand.items()}
+
+
+def build_replacement_ranks_by_season(
+    chain_index, flex_eligibility=FLEX_ELIGIBILITY
+):
+    """
+    Replacement ranks for every season in the chain. roster_positions and team
+    counts can change season to season, so each season gets its own ranks.
+
+    Returns {season: {position: starters_leaguewide}}.
+    """
+
+    leagues = chain_index.get("leagues") or {}
+
+    return {
+        season: build_replacement_ranks(league, flex_eligibility)
+        for season, league in leagues.items()
+    }
+
+
+class ReplacementBaselineCache:
+    """
+    Lazy, memoized per-(season, week) replacement-level points by position.
+
+    For a given week: score every player in the slate with that season's
+    scoring, group by position, sort descending, and read the replacement
+    band — the `band` players ranked at/just past the leaguewide starter count
+    for that position. The baseline is their mean points.
+
+    Baseline is 0.0 when the position has no starter demand (rank < 1) or the
+    slate has no players that deep — i.e. replacement is effectively a zero and
+    the player's points pass through as PAR.
+    """
+
+    def __init__(
+        self,
+        chain_index,
+        players,
+        stats_cache,
+        replacement_ranks_by_season,
+        band=DEFAULT_REPLACEMENT_BAND,
+    ):
+        self._chain_index = chain_index
+        self._players = players or {}
+        self._stats_cache = stats_cache
+        self._ranks = replacement_ranks_by_season or {}
+        self._band = max(1, int(band))
+        self._cache = {}
+
+    def get(self, season, week):
+        season = str(season)
+        key = (season, week)
+
+        if key not in self._cache:
+            self._cache[key] = self._compute(season, week)
+
+        return self._cache[key]
+
+    def _compute(self, season, week):
+        scoring = (self._chain_index.get("scoring") or {}).get(season) or {}
+        slate = self._stats_cache.get(season, week)
+        ranks = self._ranks.get(season) or {}
+
+        by_pos = defaultdict(list)
+
+        for player_id, stat_line in slate.items():
+            position = (self._players.get(player_id) or {}).get("position")
+            if position in ranks:
+                by_pos[position].append(
+                    score_stat_line(stat_line, scoring)
+                )
+
+        baselines = {}
+
+        for position, points in by_pos.items():
+            start = int(round(ranks[position]))
+
+            if start < 1:
+                baselines[position] = 0.0
+                continue
+
+            points.sort(reverse=True)
+            band = points[start : start + self._band]
+
+            baselines[position] = (
+                round(sum(band) / len(band), 4) if band else 0.0
+            )
+
+        return baselines
+
+
+def compute_par_since(
+    player_id,
+    position,
+    start_season,
+    start_week,
+    chain_index,
+    stats_cache,
+    baseline_cache,
+    weeks=REGULAR_SEASON_WEEKS,
+    floor_weekly=False,
+    end_season=None,
+    end_week=None,
+):
+    """
+    Points-above-replacement a player produced since a trade — the WAR-style
+    analog of compute_production_since.
+
+    Same counting window (filed week inclusive; later seasons in full). For
+    each week the player actually posted a stat line, PAR = the player's league
+    points minus the replacement baseline for their position that week. Weeks
+    the player didn't play contribute nothing (no credit, no penalty), which is
+    correct: a player on bye isn't beating a replacement.
+
+    floor_weekly clamps each week's PAR at 0. Off, PAR is literal WAR (a
+    below-replacement week is a penalty) — but summed over a long dynasty
+    window that punishes depth pieces you'd simply have benched. On, PAR
+    measures value-above-replacement *when the asset was startable*: a
+    sub-replacement week contributes 0, not a penalty, since an asset's floor
+    is to be dropped for the actual replacement. Floored is the better trade-
+    grading metric; unfloored is the truer WAR analog.
+
+    end_season/end_week cap the window (exclusive) at the point the receiving
+    team gave the asset up (re-trade, waiver, or drop) — see hold_window_end.
+    Without them the asset is treated as still held through the present.
+
+    Returns {par_total, points_total, games, par_per_game, per_week:[{season,
+    week, points, baseline, par}]}.
+    """
+
+    start_season = str(start_season)
+    end_key = _wk_key(end_season, end_week) if end_season is not None else None
+
+    seasons = [
+        season
+        for season in chain_index["seasons"]
+        if season >= start_season
+    ]
+
+    par_total = 0.0
+    points_total = 0.0
+    games = 0
+    per_week = []
+
+    for season in seasons:
+        scoring = chain_index["scoring"].get(season) or {}
+        first_week = start_week if season == start_season else 1
+
+        for week in weeks:
+            if week < first_week:
+                continue
+
+            if end_key is not None and _wk_key(season, week) >= end_key:
+                continue
+
+            stat_line = stats_cache.get(season, week).get(player_id)
+
+            if not stat_line:
+                continue
+
+            points = score_stat_line(stat_line, scoring)
+            baseline = baseline_cache.get(season, week).get(position, 0.0)
+            par = points - baseline
+
+            if floor_weekly and par < 0:
+                par = 0.0
+
+            if stat_line.get("gp"):
+                games += 1
+
+            points_total += points
+            par_total += par
+
+            per_week.append(
+                {
+                    "season": season,
+                    "week": week,
+                    "points": round(points, 2),
+                    "baseline": round(baseline, 2),
+                    "par": round(par, 2),
+                }
+            )
+
+    return {
+        "par_total": round(par_total, 2),
+        "points_total": round(points_total, 2),
+        "games": games,
+        "par_per_game": round(par_total / games, 2) if games else 0.0,
+        "per_week": per_week,
+    }
+
+
+def score_asset_par(
+    asset, trade, chain_index, stats_cache, baseline_cache, floor_weekly=False
+):
+    """
+    PAR analog of score_asset: attach points-above-replacement to a resolved
+    asset. Unresolved picks (future drafts) and FAAB carry no production.
+
+    Returns the asset augmented with a "par" dict (or None).
+    """
+
+    if not asset.get("resolved") or not asset.get("player_id"):
+        return {**asset, "par": None}
+
+    par = compute_par_since(
+        asset["player_id"],
+        asset.get("position"),
+        trade["season"],
+        trade["week"],
+        chain_index,
+        stats_cache,
+        baseline_cache,
+        floor_weekly=floor_weekly,
+    )
+
+    return {**asset, "par": par}
 
 
 # =============================================================================
@@ -1065,10 +1462,13 @@ def print_lopsided_summary(reviews, team_names_by_season):
     print()
 
 
-def print_manager_overview(overview, manager_names):
+def print_manager_overview(overview, manager_names, unit="pts"):
     """
     Print a manager scoreboard: headline best/worst/most-active traders, then a
     table of every manager's trade record and net production, best net first.
+
+    unit labels the net/received figures ("pts" for the legacy raw-points
+    report, "PAR" for the default report).
     """
 
     if not overview:
@@ -1091,12 +1491,12 @@ def print_manager_overview(overview, manager_names):
 
     print(
         f"  Best trader:     {name_of(best)} "
-        f"({overview[best]['net']:+.1f} net pts over "
+        f"({overview[best]['net']:+.1f} net {unit} over "
         f"{overview[best]['trades']} trades)"
     )
     print(
         f"  Worst trader:    {name_of(worst)} "
-        f"({overview[worst]['net']:+.1f} net pts over "
+        f"({overview[worst]['net']:+.1f} net {unit} over "
         f"{overview[worst]['trades']} trades)"
     )
     print(
@@ -1109,11 +1509,12 @@ def print_manager_overview(overview, manager_names):
     )
 
     print()
+    print(f"  RANKING by net {unit}:")
     print(
-        f"  {'Manager':<34}{'Trades':>7}{'W-L-T':>9}"
+        f"  {'#':<4}{'Manager':<32}{'Trades':>7}{'W-L-T':>9}"
         f"{'Received':>11}{'Net':>9}"
     )
-    print("  " + "-" * 68)
+    print("  " + "-" * 72)
 
     ordered = sorted(
         overview.items(),
@@ -1121,15 +1522,15 @@ def print_manager_overview(overview, manager_names):
         reverse=True,
     )
 
-    for owner_id, entry in ordered:
+    for rank, (owner_id, entry) in enumerate(ordered, start=1):
         record = f"{entry['wins']}-{entry['losses']}-{entry['ties']}"
 
         label = name_of(owner_id)
-        if len(label) > 34:
-            label = label[:31] + "..."
+        if len(label) > 31:
+            label = label[:28] + "..."
 
         print(
-            f"  {label:<34}{entry['trades']:>7}{record:>9}"
+            f"  {rank:<4}{label:<32}{entry['trades']:>7}{record:>9}"
             f"{entry['received']:>11.1f}{entry['net']:>+9.1f}"
         )
 
@@ -1218,14 +1619,368 @@ def print_report(reviews, team_names_by_season, league_name=None):
 
 
 # =============================================================================
+# PAR report (default): ownership-bounded, lineage-linked, readable highlights
+# =============================================================================
+
+def _par_by_season(per_week, key="par"):
+    """Sum a per-week metric into an ordered {season: rounded_total}."""
+
+    out = defaultdict(float)
+    for wk in per_week:
+        out[wk["season"]] += wk[key]
+    return {season: round(total, 1) for season, total in sorted(out.items())}
+
+
+def _merge_seasons(assets):
+    out = defaultdict(float)
+    for asset in assets:
+        for season, value in asset["by_season"].items():
+            out[season] += value
+    return {season: round(total, 1) for season, total in sorted(out.items())}
+
+
+def review_asset_par(asset, trade, roster_id, ctx):
+    """
+    Score one received asset for the roster that received it, bounded to the
+    span that roster held it (ownership-aware). Returns a render-ready dict
+    carrying PAR (headline), raw points (secondary), the hold window, a
+    per-season PAR trajectory, and fields for lineage linking.
+    """
+
+    base = {
+        "name": asset.get("name") or asset.get("label") or "?",
+        "position": asset.get("position"),
+        "player_id": asset.get("player_id"),
+        "resolved": bool(asset.get("resolved") and asset.get("player_id")),
+        "end": None,
+        "became": None,
+    }
+
+    if not base["resolved"]:
+        base.update(
+            {"par": 0.0, "par_pg": 0.0, "points": 0.0, "games": 0,
+             "hold": "unresolved (pick/FAAB)", "seasons": 0, "by_season": {}}
+        )
+        return base
+
+    end = hold_window_end(
+        ctx["timeline"], asset["player_id"], roster_id,
+        trade["season"], trade["week"],
+    )
+    end_season, end_week = end if end else (None, None)
+    base["end"] = end
+
+    par = compute_par_since(
+        asset["player_id"], asset.get("position"),
+        trade["season"], trade["week"],
+        ctx["chain_index"], ctx["stats_cache"], ctx["baseline_cache"],
+        floor_weekly=ctx["floor"], end_season=end_season, end_week=end_week,
+    )
+    pts = compute_production_since(
+        asset["player_id"], trade["season"], trade["week"],
+        ctx["chain_index"], ctx["stats_cache"],
+        end_season=end_season, end_week=end_week,
+    )
+
+    seasons = sorted({wk["season"] for wk in par["per_week"]})
+
+    if end is None:
+        hold = f"still held · {len(seasons)} seas"
+    else:
+        hold = f"held {len(seasons)} seas → left {end_season} wk{end_week}"
+
+    base.update(
+        {
+            "par": par["par_total"],
+            "par_pg": par["par_per_game"],
+            "points": pts["total"],
+            "games": par["games"],
+            "hold": hold,
+            "seasons": len(seasons),
+            "by_season": _par_by_season(par["per_week"]),
+        }
+    )
+    return base
+
+
+def build_par_review(trade, ctx):
+    """
+    Assemble one trade scored by PAR (headline) with raw points kept as a
+    secondary column. The verdict and lopsided classification run on PAR
+    totals. The review dict exposes `totals` (PAR) and `winner_roster` so the
+    existing manager-overview aggregation works unchanged.
+    """
+
+    sides = received_assets(trade, ctx["players"], ctx["pick_index"])
+    labels = ctx["team_names"].get(trade["season"], {})
+
+    reviewed = {}
+    par_totals = {}
+    points_totals = {}
+
+    for roster_id, side in sides.items():
+        assets = [
+            review_asset_par(asset, trade, roster_id, ctx)
+            for asset in side["assets"]
+        ]
+        par_sum = round(sum(a["par"] for a in assets), 2)
+        points_sum = round(sum(a["points"] for a in assets), 2)
+        games = sum(a["games"] for a in assets)
+
+        reviewed[roster_id] = {
+            "label": labels.get(roster_id, f"Roster {roster_id}"),
+            "assets": assets,
+            "faab_in": side["faab_in"],
+            "par": par_sum,
+            "points": points_sum,
+            "par_pg": round(par_sum / games, 2) if games else 0.0,
+            "by_season": _merge_seasons(assets),
+        }
+        par_totals[roster_id] = par_sum
+        points_totals[roster_id] = points_sum
+
+    winner, margin = verdict(par_totals)
+    lopsided = assess_lopsidedness(par_totals, winner, margin)
+
+    latest = int(ctx["chain_index"]["seasons"][-1])
+    return {
+        "transaction_id": trade.get("transaction_id"),
+        "season": trade["season"],
+        "week": trade["week"],
+        "status_updated": trade.get("status_updated"),
+        "sides": reviewed,
+        "totals": par_totals,          # PAR — drives verdict + manager overview
+        "points_totals": points_totals,  # secondary sanity column
+        "winner_roster": winner,
+        "margin": margin,
+        "lopsided": lopsided,
+        "seasons_elapsed": latest - int(trade["season"]) + 1,
+    }
+
+
+def attach_lineage(reviews, trades):
+    """
+    Link (never sum) trades that share an asset.
+
+    When a received asset's hold window ended because the team re-traded it, we
+    point to the trade where they shipped it and name what they got back. No
+    value is rolled up or split — the reader follows the chain themselves, so
+    every number stays a clean single-trade figure.
+
+    (Assumes Sleeper roster_id is stable across the dynasty chain, which is how
+    the hold-window bounding already works. A league that reassigns roster_ids
+    across seasons would need this keyed on the stable manager id.)
+    """
+
+    for i, review in enumerate(reviews):
+        review["trade_no"] = i + 1
+
+    reviews_by_no = {r["trade_no"]: r for r in reviews}
+
+    # (season, week, sending_roster, player_id) -> trade_no it was shipped in.
+    shipped_in = {}
+    for review, trade in zip(reviews, trades):
+        for player_id, roster_id in (trade.get("drops") or {}).items():
+            shipped_in[
+                (trade["season"], trade["week"], roster_id, player_id)
+            ] = review["trade_no"]
+
+    for review in reviews:
+        for roster_id, side in review["sides"].items():
+            for asset in side["assets"]:
+                if not asset["end"] or not asset["player_id"]:
+                    continue  # still held (or unresolved) — nothing to link
+
+                end_season, end_week = asset["end"]
+                next_no = shipped_in.get(
+                    (end_season, end_week, roster_id, asset["player_id"])
+                )
+
+                if next_no is None:
+                    # Left via waiver/drop, not a trade — lineage ends here.
+                    asset["became"] = {"dropped": True}
+                    continue
+
+                return_side = reviews_by_no[next_no]["sides"].get(roster_id, {})
+                asset["became"] = {
+                    "trade_no": next_no,
+                    "assets": [a["name"] for a in return_side.get("assets", [])],
+                }
+
+
+def _par_traj(by_season):
+    """Compact per-season trajectory, e.g. '19:+540  20:+310'."""
+
+    if not by_season:
+        return "—"
+    return "  ".join(
+        f"{season[2:]}:{value:+.0f}" for season, value in by_season.items()
+    )
+
+
+def _par_lineage_line(asset):
+    """Cross-reference to the re-trade an asset flowed into (no value summed)."""
+
+    became = asset.get("became")
+    if not became:
+        return None
+    if became.get("dropped"):
+        return "            \u21b3 later dropped — lineage ends (no trade)"
+    got = ", ".join(became["assets"]) or "picks/FAAB"
+    return f"            \u21b3 became: {got}  (see T{became['trade_no']})"
+
+
+def _par_takeaway(review, winner):
+    if winner is None:
+        return "\u2192 Even by PAR."
+
+    win_side = review["sides"][winner]
+    others = [s["par"] for rid, s in review["sides"].items() if rid != winner]
+    runner_up = max(others) if others else 0.0
+
+    top = max(win_side["assets"], key=lambda a: a["par"], default=None)
+    if not top or top["par"] <= 0:
+        return "\u2192 Winner by attrition; neither side got much startable value."
+
+    note = f"\u2192 {top['name']} was the engine ({top['par']:.0f} PAR)"
+    if runner_up >= 0 and top["par"] >= runner_up:
+        note += " — alone out-produced the entire return."
+    else:
+        note += "."
+    return note
+
+
+def render_par_highlight(rank, review):
+    lines = []
+    tag = (review["lopsided"] or "notable").upper()
+    when = f"{review['season']} (filed wk {review['week']})"
+    lines.append(
+        f"\n#{rank}  [T{review['trade_no']}]  {tag} · {when} · "
+        f"{review['seasons_elapsed']} seasons elapsed"
+    )
+
+    winner = review["winner_roster"]
+    ordered = sorted(
+        review["sides"].items(), key=lambda kv: kv[1]["par"], reverse=True
+    )
+
+    for roster_id, side in ordered:
+        mark = "WON " if roster_id == winner else "lost"
+        if winner is None:
+            mark = "tie "
+        head = (
+            f"  {mark}  {side['label']:<34} "
+            f"{side['par']:>8.1f} PAR  ({side['par_pg']:.1f}/G · "
+            f"{side['points']:.0f} pts)"
+        )
+        if roster_id == winner and review["margin"]:
+            head += f"  \u25b8 +{review['margin']:.1f}"
+        lines.append(head)
+        lines.append(f"        by season: {_par_traj(side['by_season'])}")
+        for asset in side["assets"]:
+            pos = f" ({asset['position']})" if asset["position"] else ""
+            lines.append(
+                f"          {asset['name']}{pos:<6}  "
+                f"{asset['par']:>7.1f} PAR · {asset['par_pg']:.1f}/G · "
+                f"{asset['hold']}"
+            )
+            lineage = _par_lineage_line(asset)
+            if lineage:
+                lines.append(lineage)
+
+    lines.append("  " + _par_takeaway(review, winner))
+    return "\n".join(lines)
+
+
+def render_par_index_entry(review):
+    """
+    Medium-detail listing for one trade: a header line (trade no, when, class,
+    winner + margin) then one line per side with PAR, raw points, and the
+    assets received. Enough context to judge any trade without the full
+    highlight treatment.
+    """
+
+    when = f"{review['season']} wk{review['week']}"
+    winner = review["winner_roster"]
+
+    bits = [f"T{review['trade_no']:<4}{when}"]
+    if review["lopsided"]:
+        bits.append(review["lopsided"].upper())
+    if winner is None:
+        bits.append("even")
+    else:
+        bits.append(
+            f"{review['sides'][winner]['label']} +{review['margin']:.1f} PAR"
+        )
+
+    lines = ["  " + "  ·  ".join(bits)]
+
+    ordered = sorted(
+        review["sides"].items(), key=lambda kv: kv[1]["par"], reverse=True
+    )
+    for roster_id, side in ordered:
+        mark = "\u25b8" if roster_id == winner else " "
+        names = ", ".join(a["name"] for a in side["assets"]) or "(picks/FAAB)"
+        if len(names) > 50:
+            names = names[:47] + "..."
+        lines.append(
+            f"     {mark} {side['label']:<30} {side['par']:>7.1f} PAR "
+            f"({side['points']:>6.0f} pts)  {names}"
+        )
+
+    return "\n".join(lines)
+
+
+def print_par_report(reviews, league_name=None, top=12, floored=True):
+    """
+    Print the default PAR report: a header, the most lopsided trades rendered
+    with full context (per-asset PAR, hold windows, per-season trajectory,
+    lineage links), then a compact chronological index of every trade.
+    """
+
+    mode = "floored (value-when-startable)" if floored else "literal WAR"
+    print("=" * 78)
+    print(
+        "DYNASTY TRADE REVIEW — Points Above Replacement (PAR)"
+        + (f" — {league_name}" if league_name else "")
+    )
+
+    if not reviews:
+        print("\nNo completed trades found.")
+        return
+
+    seasons = sorted({r["season"] for r in reviews})
+    print(
+        f"{len(reviews)} trades · {seasons[0]}–{seasons[-1]} · PAR mode: {mode}"
+    )
+    print(
+        "PAR is the headline (raw points shown as a secondary column). "
+        "Production counted only while the receiving team held the asset."
+    )
+    print("=" * 78)
+
+    ranked = sorted(reviews, key=lambda r: r["margin"], reverse=True)
+    print(f"\nTOP {min(top, len(ranked))} HIGHLIGHTS (by PAR margin)")
+    print("-" * 78)
+    for rank, review in enumerate(ranked[:top], start=1):
+        print(render_par_highlight(rank, review))
+
+    print("\n\nALL TRADES (chronological — rosters, PAR, and raw points)")
+    print("-" * 78)
+    for review in reviews:
+        print(render_par_index_entry(review))
+        print()
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Dynasty trade review: how the assets in each past trade "
-            "have performed since, with a per-trade winner verdict."
+            "Dynasty trade review: how the assets in each past trade have "
+            "performed since, graded by Points Above Replacement (PAR)."
         )
     )
 
@@ -1237,7 +1992,6 @@ def main():
             f"is walked backward from it (default: {DEFAULT_LEAGUE_ID})."
         ),
     )
-
     parser.add_argument(
         "--season",
         default=None,
@@ -1245,6 +1999,34 @@ def main():
             "Only review trades processed in this season (e.g. 2025). "
             "By default every season in the dynasty is reviewed."
         ),
+    )
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=12,
+        help="Number of highlight trades to show (default 12).",
+    )
+    parser.add_argument(
+        "--band",
+        type=int,
+        default=DEFAULT_REPLACEMENT_BAND,
+        help=(
+            "Ranks past the last leaguewide starter that define replacement "
+            f"level (default {DEFAULT_REPLACEMENT_BAND})."
+        ),
+    )
+    parser.add_argument(
+        "--unfloored",
+        action="store_true",
+        help=(
+            "Use literal WAR (below-replacement weeks penalize) instead of "
+            "the floored default (value-when-startable)."
+        ),
+    )
+    parser.add_argument(
+        "--raw-points",
+        action="store_true",
+        help="Print the legacy points-only report instead of the PAR report.",
     )
 
     args = parser.parse_args()
@@ -1261,12 +2043,8 @@ def main():
         return
 
     league_name = chain[0].get("name")
-    seasons = ", ".join(
-        str(league.get("season")) for league in chain
-    )
-    print(
-        f"Found {len(chain)} season(s) for \"{league_name}\": {seasons}."
-    )
+    seasons = ", ".join(str(league.get("season")) for league in chain)
+    print(f"Found {len(chain)} season(s) for \"{league_name}\": {seasons}.")
 
     print("Loading Sleeper player map...")
     players = get_players()
@@ -1278,23 +2056,49 @@ def main():
     print("Building manager directory...")
     directory = build_manager_directory(chain)
 
-    print("Collecting trades and scoring production since each...")
-    reviews = build_all_reviews(
-        chain,
-        players,
-        season_filter=args.season,
-    )
+    # ---- Legacy raw-points report -----------------------------------------
+    if args.raw_points:
+        print("Collecting trades and scoring raw production since each...")
+        reviews = build_all_reviews(chain, players, season_filter=args.season)
+        print_report(reviews, team_names_by_season, league_name=league_name)
+        overview = compute_manager_overview(
+            reviews, directory["owner_by_season_roster"]
+        )
+        print_manager_overview(overview, directory["names"])
+        return
 
-    print_report(
-        reviews,
-        team_names_by_season,
-        league_name=league_name,
+    # ---- Default PAR report -----------------------------------------------
+    print("Collecting trades, ownership timeline, and replacement baselines...")
+    chain_index = index_chain(chain)
+    trades = collect_trades(chain)
+    if args.season:
+        trades = [t for t in trades if t["season"] == str(args.season)]
+
+    ctx = {
+        "chain_index": chain_index,
+        "players": players,
+        "pick_index": build_pick_index(chain),
+        "team_names": team_names_by_season,
+        "stats_cache": WeeklyStatsCache(),
+        "timeline": build_ownership_timeline(chain),
+        "floor": not args.unfloored,
+        "baseline_cache": ReplacementBaselineCache(
+            chain_index, players, WeeklyStatsCache(),
+            build_replacement_ranks_by_season(chain_index), band=args.band,
+        ),
+    }
+
+    reviews = [build_par_review(trade, ctx) for trade in trades]
+    attach_lineage(reviews, trades)
+
+    print_par_report(
+        reviews, league_name=league_name, top=args.top, floored=ctx["floor"]
     )
 
     overview = compute_manager_overview(
         reviews, directory["owner_by_season_roster"]
     )
-    print_manager_overview(overview, directory["names"])
+    print_manager_overview(overview, directory["names"], unit="PAR")
 
 
 if __name__ == "__main__":
