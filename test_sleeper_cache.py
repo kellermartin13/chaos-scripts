@@ -6,6 +6,8 @@ Redis is faked in-memory; no server or network is required.
 """
 
 import json
+import os
+import time
 
 import sleeper_cache
 import chaos
@@ -122,3 +124,69 @@ class TestBothScriptsShareCache:
         )
 
         assert chaos.get_sleeper_players() == {"y": 2}
+
+
+class TestFilePlayersCache:
+    """File-cache layer used when SLEEPER_PLAYERS_FILE / players_file is set."""
+
+    def test_fresh_file_hit_skips_fetch(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            sleeper_cache, "redis_client",
+            lambda url=sleeper_cache.REDIS_URL: None,
+        )
+        path = tmp_path / "players.json"
+        path.write_text(json.dumps({"p1": {"n": "File Guy"}}))
+
+        def fetch():
+            raise AssertionError("should not fetch on a fresh file hit")
+
+        result = sleeper_cache.cached_players(fetch, players_file=str(path))
+
+        assert result == {"p1": {"n": "File Guy"}}
+
+    def test_miss_fetches_and_writes_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            sleeper_cache, "redis_client",
+            lambda url=sleeper_cache.REDIS_URL: None,
+        )
+        path = tmp_path / "nested" / "players.json"
+
+        result = sleeper_cache.cached_players(
+            lambda: {"q": 2}, players_file=str(path)
+        )
+
+        assert result == {"q": 2}
+        assert json.loads(path.read_text()) == {"q": 2}
+
+    def test_stale_file_is_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            sleeper_cache, "redis_client",
+            lambda url=sleeper_cache.REDIS_URL: None,
+        )
+        path = tmp_path / "players.json"
+        path.write_text(json.dumps({"stale": 1}))
+        old = time.time() - (sleeper_cache.PLAYERS_CACHE_TTL_SECONDS + 60)
+        os.utime(path, (old, old))
+
+        result = sleeper_cache.cached_players(
+            lambda: {"fresh": 1}, players_file=str(path)
+        )
+
+        assert result == {"fresh": 1}
+
+    def test_read_players_file_missing_returns_none(self, tmp_path):
+        missing = tmp_path / "nope.json"
+
+        assert sleeper_cache.read_players_file(str(missing)) is None
+
+    def test_redis_hit_short_circuits_file(self, tmp_path):
+        fake = FakeRedis()
+        fake.store[sleeper_cache.PLAYERS_CACHE_KEY] = json.dumps({"r": 1})
+        path = tmp_path / "players.json"
+        path.write_text(json.dumps({"f": 2}))
+
+        result = sleeper_cache.cached_players(
+            lambda: {"live": 3}, client=fake, players_file=str(path)
+        )
+
+        assert result == {"r": 1}
