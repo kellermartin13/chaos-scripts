@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Trade review — same-week re-trades no longer double-count.** A player
+  traded more than once within the same filed week (e.g. multiple offseason
+  trades, which Sleeper all stamps as week 1) was credited to *every* trade,
+  appearing "still held" on each. `hold_window_end` now orders same-week events
+  by `status_updated`, so an intermediate owner's production window closes when
+  they flipped the asset and only the true holder keeps the credit.
+
+### Changed
+
+- **Trade review — offseason trades are labeled "offseason".** Trades filed
+  under week 1 before the season kicks off now display as `<season> offseason`
+  instead of `<season> wk1`, based on the trade's timestamp. Scoring is
+  unchanged — offseason trades still count the whole season.
+
 ## [1.0.0] - 2026-09-15
 
 First stable release. `chaos.py` scores a week of League of Chaos bonuses from
