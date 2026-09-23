@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
+import contextlib
+import html
+import io
+import os
 import sys
 import urllib.error
 from collections import defaultdict
@@ -11,6 +15,7 @@ import pandas as pd
 import requests
 import nfl_data_py as nfl
 
+import report_html
 from sleeper_cache import cached_players
 
 
@@ -1497,6 +1502,434 @@ def redzone_los_text(play):
     return "the red zone"
 
 
+def score_player_adjustment(
+    gsis_id,
+    tackles,
+    drops,
+    invalid,
+    redzone,
+    trick_tds,
+    penalties,
+    count_assists=True,
+):
+    """
+    Net auto-scored chaos adjustment for one started player.
+
+    Single source of truth for the per-player total used by both the detailed
+    report and the per-team rollup:
+        tackle + drop + red-zone + non-QB-TD + penalty - invalid
+    """
+
+    tackle = tackles.get(gsis_id) or {}
+    solo = tackle.get("solo", 0)
+    assists = tackle.get("assists", 0)
+    tackle_count = solo + assists if count_assists else solo
+
+    drop_count = (drops.get(gsis_id) or {}).get("count", 0)
+    redzone_count = (redzone.get(gsis_id) or {}).get("count", 0)
+    trick_count = (trick_tds.get(gsis_id) or {}).get("count", 0)
+    penalty_points = (penalties.get(gsis_id) or {}).get("points", 0)
+    invalid_penalty = INVALID_SPOT_POINTS if invalid.get(gsis_id) else 0
+
+    return (
+        tackle_count * TACKLE_POINTS
+        + drop_count * DROP_POINTS
+        + redzone_count * REDZONE_TURNOVER_POINTS
+        + trick_count * NON_QB_TD_PASS_POINTS
+        + penalty_points
+        - invalid_penalty
+    )
+
+
+def compute_team_adjustments(
+    starters,
+    tackles=None,
+    drops=None,
+    invalid=None,
+    redzone=None,
+    trick_tds=None,
+    penalties=None,
+    count_assists=True,
+):
+    """
+    Net auto-scored chaos adjustment per roster_id — the same totals the
+    COMMISSIONER ADJUSTMENTS section prints, exposed for the result-change
+    analysis. Sums score_player_adjustment over every started player with an
+    event.
+    """
+
+    tackles = tackles or {}
+    drops = drops or {}
+    invalid = invalid or {}
+    redzone = redzone or {}
+    trick_tds = trick_tds or {}
+    penalties = penalties or {}
+
+    relevant = (
+        set(tackles)
+        | set(drops)
+        | set(invalid)
+        | set(redzone)
+        | set(trick_tds)
+        | set(penalties)
+    )
+
+    adjustments = defaultdict(int)
+
+    for gsis_id in relevant:
+        player = starters.get(gsis_id)
+        if not player:
+            continue
+        adjustments[player["roster_id"]] += score_player_adjustment(
+            gsis_id, tackles, drops, invalid, redzone, trick_tds, penalties,
+            count_assists=count_assists,
+        )
+
+    return dict(adjustments)
+
+
+def parse_manual_adjustments(specs, team_names):
+    """
+    Parse manual chaos-award specs into {roster_id: summed_points}.
+
+    Each spec is "Team Name:+20" or "<roster_id>:-15" (points signed). Team is
+    matched case-insensitively against team_names, or given as a numeric
+    roster_id. Blank lines and lines starting with '#' are ignored. Multiple
+    awards to one team accumulate.
+
+    Returns (adjustments, warnings). warnings lists specs that couldn't be
+    applied so the caller can surface them rather than silently dropping.
+    """
+
+    name_to_roster = {
+        str(name).strip().lower(): roster_id
+        for roster_id, name in (team_names or {}).items()
+    }
+
+    adjustments = defaultdict(int)
+    warnings = []
+
+    for spec in specs or []:
+        raw = str(spec).strip()
+        if not raw or raw.startswith("#"):
+            continue
+
+        if ":" not in raw:
+            warnings.append(f"no ':' separator: {spec!r}")
+            continue
+
+        team_part, points_part = raw.rsplit(":", 1)
+        team_part = team_part.strip()
+
+        try:
+            points = int(points_part.strip())
+        except ValueError:
+            warnings.append(f"points not an integer: {spec!r}")
+            continue
+
+        if team_part.isdigit() and int(team_part) in (team_names or {}):
+            roster_id = int(team_part)
+        else:
+            roster_id = name_to_roster.get(team_part.lower())
+
+        if roster_id is None:
+            warnings.append(f"unknown team: {spec!r}")
+            continue
+
+        adjustments[roster_id] += points
+
+    return dict(adjustments), warnings
+
+
+def analyze_result_changes(
+    matchups, auto_adjustments, manual_adjustments=None, team_names=None,
+):
+    """
+    Compare Sleeper base results to base + chaos results.
+
+    Chaos adjustment per roster = auto_adjustments + manual_adjustments (both
+    keyed by roster_id). Base score is the Sleeper matchup `points`; head-to-
+    head pairing is the matchup `matchup_id`.
+
+    Returns:
+        {
+          "matchup_changes": [ ... ],   # only matchups whose winner changed
+          "high_scorer": {base, adj, changed},  # the weekly $5
+        }
+    """
+
+    manual_adjustments = manual_adjustments or {}
+    team_names = team_names or {}
+
+    def name(roster_id):
+        return team_names.get(roster_id, f"Roster {roster_id}")
+
+    def chaos_for(roster_id):
+        return (
+            auto_adjustments.get(roster_id, 0)
+            + manual_adjustments.get(roster_id, 0)
+        )
+
+    base = {}
+    adjusted = {}
+    groups = defaultdict(list)
+
+    for matchup in matchups or []:
+        roster_id = matchup.get("roster_id")
+        if roster_id is None:
+            continue
+        points = float(matchup.get("points") or 0.0)
+        base[roster_id] = points
+        adjusted[roster_id] = points + chaos_for(roster_id)
+        matchup_id = matchup.get("matchup_id")
+        if matchup_id is not None:
+            groups[matchup_id].append(roster_id)
+
+    def unique_winner(scores, rosters):
+        """roster_id of the unique high scorer, or None for a tie/empty."""
+        if not rosters:
+            return None
+        best = max(rosters, key=lambda r: scores[r])
+        tied = [r for r in rosters if scores[r] == scores[best]]
+        return best if len(tied) == 1 else None
+
+    matchup_changes = []
+
+    for matchup_id, rosters in groups.items():
+        if len(rosters) < 2:
+            continue
+
+        base_winner = unique_winner(base, rosters)
+        adj_winner = unique_winner(adjusted, rosters)
+
+        if base_winner == adj_winner:
+            continue
+
+        matchup_changes.append(
+            {
+                "matchup_id": matchup_id,
+                "base_winner": base_winner,
+                "adj_winner": adj_winner,
+                "teams": [
+                    {
+                        "roster_id": r,
+                        "name": name(r),
+                        "base": round(base[r], 2),
+                        "chaos": chaos_for(r),
+                        "adjusted": round(adjusted[r], 2),
+                    }
+                    for r in sorted(
+                        rosters, key=lambda r: adjusted[r], reverse=True
+                    )
+                ],
+            }
+        )
+
+    high_scorer = None
+    if base:
+        base_top = max(base, key=lambda r: base[r])
+        adj_top = max(adjusted, key=lambda r: adjusted[r])
+        high_scorer = {
+            "base": {
+                "roster_id": base_top, "name": name(base_top),
+                "points": round(base[base_top], 2),
+            },
+            "adjusted": {
+                "roster_id": adj_top, "name": name(adj_top),
+                "points": round(adjusted[adj_top], 2),
+            },
+            "changed": base_top != adj_top,
+        }
+
+    return {
+        "matchup_changes": matchup_changes,
+        "high_scorer": high_scorer,
+    }
+
+
+def print_result_changes(analysis, week, manual_warnings=None):
+    """
+    Print the Chaos impact on the week's results: matchups whose head-to-head
+    winner flipped, and whether the weekly high scorer ($5) changed.
+    """
+
+    print()
+    print("=" * 80)
+    print(f"CHAOS IMPACT ON WEEK {week} RESULTS")
+    print("=" * 80)
+
+    changes = analysis.get("matchup_changes") or []
+    print()
+    print("Matchup results changed by Chaos:")
+    if not changes:
+        print("  (none — Chaos did not flip any head-to-head result)")
+    else:
+        for change in changes:
+            teams = change["teams"]
+            detail = "  vs  ".join(
+                f"{t['name']} {t['base']:.1f}\u2192{t['adjusted']:.1f} "
+                f"({t['chaos']:+d})"
+                for t in teams
+            )
+            names = {t["roster_id"]: t["name"] for t in teams}
+            was = (
+                "was a tie" if change["base_winner"] is None
+                else f"was {names[change['base_winner']]}"
+            )
+            now = (
+                "now a TIE" if change["adj_winner"] is None
+                else f"now {names[change['adj_winner']]}"
+            )
+            print(f"  {detail}   [{now}; {was}]")
+
+    high = analysis.get("high_scorer")
+    print()
+    print("Weekly high scorer ($5):")
+    if not high:
+        print("  (no scores available)")
+    else:
+        print(
+            f"  Base:        {high['base']['name']} "
+            f"({high['base']['points']:.1f})"
+        )
+        tag = "  <- CHANGED" if high["changed"] else "  (unchanged)"
+        print(
+            f"  After Chaos: {high['adjusted']['name']} "
+            f"({high['adjusted']['points']:.1f}){tag}"
+        )
+
+    if manual_warnings:
+        print()
+        print("Manual adjustment warnings (not applied):")
+        for warning in manual_warnings:
+            print(f"  - {warning}")
+
+    print()
+
+
+def render_chaos_html(
+    week, season, analysis, adjustments, team_names, audit_text,
+    league_name=None, generated=None,
+):
+    """
+    Build the styled HTML page for a scored week: the Chaos impact on results
+    (matchup flips + the $5 high scorer), a team-adjustments table, and the
+    full per-play audit in a collapsible <pre>. All content is html-escaped.
+    """
+
+    esc = html.escape
+    title = f"{league_name or 'League of Chaos'} — Week {week} Chaos"
+
+    parts = [
+        f'<header class="page"><h1>{esc(title)}</h1>'
+        f'<p class="meta">Season {esc(str(season))} · Week {esc(str(week))} · '
+        'Chaos impact on results</p></header>'
+    ]
+
+    # --- Matchup flips ---
+    parts.append(
+        '<section aria-labelledby="mc-h">'
+        '<h2 id="mc-h">Matchup results changed by Chaos</h2>'
+    )
+    changes = analysis.get("matchup_changes") or []
+    if not changes:
+        parts.append(
+            '<p class="muted">Chaos did not flip any head-to-head result '
+            'this week.</p>'
+        )
+    else:
+        for change in changes:
+            names = {t["roster_id"]: t["name"] for t in change["teams"]}
+            now = (
+                "now a TIE" if change["adj_winner"] is None
+                else f'now {esc(names[change["adj_winner"]])} wins'
+            )
+            was = (
+                "was a tie" if change["base_winner"] is None
+                else f'was {esc(names[change["base_winner"]])}'
+            )
+            sides = ""
+            for t in change["teams"]:
+                win = t["roster_id"] == change["adj_winner"]
+                cls = "side win" if win else "side"
+                tag = '<span class="tag win">WINS</span>' if win else ""
+                chaos = t["chaos"]
+                cbadge = (
+                    f'<span class="badge '
+                    f'{"up" if chaos > 0 else "down" if chaos < 0 else ""}">'
+                    f'{chaos:+d}</span>'
+                )
+                sides += (
+                    f'<div class="{cls}"><div class="side-head">'
+                    f'<span class="team">{esc(t["name"])}</span>'
+                    f'<span class="num">{t["base"]:.1f} \u2192 '
+                    f'{t["adjusted"]:.1f}</span>{cbadge}{tag}</div></div>'
+                )
+            parts.append(
+                '<article class="card flip"><div class="thead">'
+                '<span class="badge flip">RESULT FLIP</span>'
+                f'<span class="muted">{now}; {was}</span></div>{sides}</article>'
+            )
+    parts.append("</section>")
+
+    # --- High scorer ($5) ---
+    parts.append(
+        '<section aria-labelledby="hs-h">'
+        '<h2 id="hs-h">Weekly high scorer ($5)</h2>'
+    )
+    high = analysis.get("high_scorer")
+    if not high:
+        parts.append('<p class="muted">No scores available.</p>')
+    else:
+        cls = "callout changed" if high["changed"] else "callout"
+        tag = (
+            '<span class="badge flip">PAYOUT MOVES</span>'
+            if high["changed"] else '<span class="muted">unchanged</span>'
+        )
+        parts.append(
+            f'<div class="{cls}">{tag}'
+            f'<p>Base: <strong>{esc(high["base"]["name"])}</strong> '
+            f'<span class="num">({high["base"]["points"]:.1f})</span></p>'
+            f'<p>After Chaos: <strong>{esc(high["adjusted"]["name"])}</strong> '
+            f'<span class="num">({high["adjusted"]["points"]:.1f})</span></p>'
+            "</div>"
+        )
+    parts.append("</section>")
+
+    # --- Team adjustments table ---
+    parts.append(
+        '<section aria-labelledby="adj-h">'
+        '<h2 id="adj-h">Team chaos adjustments</h2>'
+    )
+    if not adjustments:
+        parts.append('<p class="muted">No adjustments this week.</p>')
+    else:
+        rows = ""
+        for roster_id, pts in sorted(
+            adjustments.items(), key=lambda kv: kv[1], reverse=True
+        ):
+            team = team_names.get(roster_id, f"Roster {roster_id}")
+            rows += (
+                f"<tr><td>{esc(team)}</td>"
+                f"<td class='num'>{pts:+d}</td></tr>"
+            )
+        parts.append(
+            '<table><thead><tr><th scope="col">Team</th>'
+            '<th scope="col" class="num">Net adjustment</th></tr></thead>'
+            f"<tbody>{rows}</tbody></table>"
+        )
+    parts.append("</section>")
+
+    # --- Full audit (collapsible monospace) ---
+    parts.append(
+        '<section aria-labelledby="au-h"><h2 id="au-h">Full scoring audit</h2>'
+        "<details><summary>Show per-play evidence</summary>"
+        f"<pre>{esc(audit_text)}</pre></details></section>"
+    )
+
+    return report_html.document(title, "".join(parts), generated)
+
+
 def print_report(
     week,
     starters,
@@ -1683,13 +2116,9 @@ def print_report(
             else 0
         )
 
-        total = (
-            tackle_bonus
-            + drop_bonus
-            + redzone_bonus
-            + trick_bonus
-            + penalty_bonus
-            - invalid_penalty
+        total = score_player_adjustment(
+            gsis_id, tackles, drops, invalid, redzone, trick_tds, penalties,
+            count_assists=count_assists,
         )
 
         if (
@@ -2186,6 +2615,48 @@ def main():
         ),
     )
 
+    parser.add_argument(
+        "--adjust",
+        action="append",
+        default=[],
+        metavar="TEAM:POINTS",
+        help=(
+            "Manual chaos award layered on top of auto-scoring for the "
+            "result-change analysis, e.g. --adjust \"RB FACTORY:+20\". TEAM is "
+            "a team name or roster id; POINTS is signed. Repeatable."
+        ),
+    )
+
+    parser.add_argument(
+        "--adjust-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "File of manual chaos awards, one \"TEAM:POINTS\" per line "
+            "(blank lines and # comments ignored)."
+        ),
+    )
+
+    parser.add_argument(
+        "--html",
+        action="store_true",
+        help=(
+            "Emit the report as a self-contained HTML page (for GitHub Pages) "
+            "instead of plain text."
+        ),
+    )
+
+    parser.add_argument(
+        "--html-out",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Also write the HTML page to PATH while printing the text report "
+            "to stdout — one run produces both (used by CI to publish Pages "
+            "and open the issue without loading data twice)."
+        ),
+    )
+
     args = parser.parse_args()
 
     #
@@ -2229,6 +2700,16 @@ def main():
     if args.check_only:
         run_check_only(args.season, args.week)
         return
+
+    #
+    # In --html mode, route all incidental progress output to stderr so stdout
+    # carries only the final HTML document. The report itself is captured
+    # explicitly below and written to the real stdout.
+    #
+
+    real_stdout = sys.stdout
+    if args.html:
+        sys.stdout = sys.stderr
 
     #
     # Gate on FTN coverage FIRST. A partially-charted week must exit here,
@@ -2388,48 +2869,110 @@ def main():
     )
 
     #
-    # Report
+    # Result-change analysis inputs: auto-scored per-team adjustments, plus
+    # any manual awards (--adjust / --adjust-file), and the week's matchups.
     #
 
-    print_report(
-        week=args.week,
-        starters=starters,
-        team_names=team_names,
-        tackles=tackles,
-        drops=drops,
-        invalid=invalid,
-        exempt=exempted,
-        redzone=redzone,
-        trick_tds=trick_tds,
-        penalties=penalties,
-        count_assists=(
-            not args.solo_tackles_only
-        ),
+    count_assists = not args.solo_tackles_only
+
+    auto_adjustments = compute_team_adjustments(
+        starters, tackles, drops, invalid, redzone, trick_tds, penalties,
+        count_assists=count_assists,
     )
 
+    manual_specs = list(args.adjust or [])
+    if args.adjust_file:
+        try:
+            with open(args.adjust_file, encoding="utf-8") as handle:
+                manual_specs += handle.read().splitlines()
+        except OSError as exc:
+            print(
+                f"WARNING: could not read --adjust-file "
+                f"{args.adjust_file}: {exc}",
+                file=sys.stderr,
+            )
+
+    manual_adjustments, manual_warnings = parse_manual_adjustments(
+        manual_specs, team_names
+    )
+
+    matchups = get_matchups(league_id, args.week)
+
+    analysis = analyze_result_changes(
+        matchups, auto_adjustments, manual_adjustments, team_names
+    )
+
+    merged_adjustments = {
+        roster_id: (
+            auto_adjustments.get(roster_id, 0)
+            + manual_adjustments.get(roster_id, 0)
+        )
+        for roster_id in set(auto_adjustments) | set(manual_adjustments)
+    }
+
+    def _emit_report():
+        print_report(
+            week=args.week,
+            starters=starters,
+            team_names=team_names,
+            tackles=tackles,
+            drops=drops,
+            invalid=invalid,
+            exempt=exempted,
+            redzone=redzone,
+            trick_tds=trick_tds,
+            penalties=penalties,
+            count_assists=count_assists,
+        )
+
+        print_result_changes(analysis, args.week, manual_warnings)
+
+        if args.flag_candidates:
+            ejections = find_ejection_candidates(pbp, starters)
+            fumbles = find_goal_line_fumble_candidates(pbp, starters)
+            one_point_safeties = find_one_point_safeties(pbp)
+            print_candidates(
+                ejections, fumbles, team_names, one_point_safeties
+            )
+
     #
-    # Optional review candidates (printed, never scored)
+    # Emit. The report is rendered once into a buffer, then written as text
+    # (stdout) and/or HTML (stdout for --html, or a file for --html-out) so a
+    # single run can feed both the issue and the Pages page without loading
+    # nflverse/Sleeper data twice.
     #
 
-    if args.flag_candidates:
-        ejections = find_ejection_candidates(
-            pbp,
-            starters,
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        _emit_report()
+    report_text = buffer.getvalue()
+
+    league_name = league.get("name") if league else None
+
+    def _html():
+        return render_chaos_html(
+            args.week, args.season, analysis, merged_adjustments,
+            team_names, report_text, league_name=league_name,
         )
 
-        fumbles = find_goal_line_fumble_candidates(
-            pbp,
-            starters,
-        )
+    if args.html:
+        print(_html(), file=real_stdout)
+    else:
+        real_stdout.write(report_text)
 
-        one_point_safeties = find_one_point_safeties(pbp)
-
-        print_candidates(
-            ejections,
-            fumbles,
-            team_names,
-            one_point_safeties,
-        )
+        if args.html_out:
+            try:
+                directory = os.path.dirname(args.html_out)
+                if directory:
+                    os.makedirs(directory, exist_ok=True)
+                with open(args.html_out, "w", encoding="utf-8") as handle:
+                    handle.write(_html())
+            except OSError as exc:
+                print(
+                    f"WARNING: could not write --html-out "
+                    f"{args.html_out}: {exc}",
+                    file=sys.stderr,
+                )
 
 
 if __name__ == "__main__":
