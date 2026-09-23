@@ -1482,3 +1482,230 @@ class TestPrintReportExempt:
         assert "injury: ruled Out (Knee)" in out
         # no scored adjustments -> no commissioner totals section
         assert "TOTAL CHAOS ADJUSTMENTS" not in out
+
+
+# ---------------------------------------------------------------------------
+# score_player_adjustment / compute_team_adjustments
+# ---------------------------------------------------------------------------
+
+class TestComputeTeamAdjustments:
+
+    @pytest.fixture
+    def starters(self):
+        return {
+            "a": {"roster_id": 1, "name": "A", "position": "WR"},
+            "b": {"roster_id": 1, "name": "B", "position": "RB"},
+            "c": {"roster_id": 2, "name": "C", "position": "TE"},
+        }
+
+    def test_sums_tackles_and_drops_per_team(self, starters):
+        result = chaos.compute_team_adjustments(
+            starters,
+            tackles={"a": {"solo": 1, "assists": 1}},
+            drops={"b": {"count": 2}},
+        )
+
+        # a: (1+1)*15 = 30 ; b: 2*5 = 10 -> roster 1 = 40
+        assert result[1] == 40
+
+    def test_invalid_spot_penalizes(self, starters):
+        result = chaos.compute_team_adjustments(
+            starters, invalid={"c": {"snap_pct": 0.1, "touches": 0}}
+        )
+
+        assert result[2] == -chaos.INVALID_SPOT_POINTS
+
+    def test_solo_only_excludes_assists(self, starters):
+        result = chaos.compute_team_adjustments(
+            starters,
+            tackles={"a": {"solo": 1, "assists": 1}},
+            count_assists=False,
+        )
+
+        assert result[1] == chaos.TACKLE_POINTS  # solo only
+
+    def test_score_player_adjustment_combines_rules(self):
+        total = chaos.score_player_adjustment(
+            "a",
+            tackles={"a": {"solo": 1, "assists": 0}},
+            drops={"a": {"count": 1}},
+            invalid={},
+            redzone={"a": {"count": 1}},
+            trick_tds={},
+            penalties={"a": {"points": 5}},
+        )
+
+        # 15 + 5 + 5 + 0 + 5 = 30
+        assert total == 30
+
+
+# ---------------------------------------------------------------------------
+# parse_manual_adjustments
+# ---------------------------------------------------------------------------
+
+class TestParseManualAdjustments:
+
+    @pytest.fixture
+    def team_names(self):
+        return {1: "RB FACTORY", 2: "hoopaloop"}
+
+    def test_sums_multiple_awards_by_name(self, team_names):
+        adj, _ = chaos.parse_manual_adjustments(
+            ["RB FACTORY:+20", "RB FACTORY:5"], team_names
+        )
+
+        assert adj[1] == 25
+
+    def test_resolves_numeric_roster_id(self, team_names):
+        adj, _ = chaos.parse_manual_adjustments(["2:+10"], team_names)
+
+        assert adj[2] == 10
+
+    def test_case_insensitive_name_match(self, team_names):
+        adj, _ = chaos.parse_manual_adjustments(["hoopaloop:-15"], team_names)
+
+        assert adj[2] == -15
+
+    def test_unknown_team_warns_and_skips(self, team_names):
+        adj, warnings = chaos.parse_manual_adjustments(["Nobody:+5"], team_names)
+
+        assert adj == {} and any("unknown team" in w for w in warnings)
+
+    def test_bad_points_warns(self, team_names):
+        adj, warnings = chaos.parse_manual_adjustments(
+            ["hoopaloop:abc"], team_names
+        )
+
+        assert adj == {} and any("integer" in w for w in warnings)
+
+    def test_comments_and_blanks_ignored(self, team_names):
+        adj, warnings = chaos.parse_manual_adjustments(
+            ["# a note", "", "  "], team_names
+        )
+
+        assert adj == {} and warnings == []
+
+
+# ---------------------------------------------------------------------------
+# analyze_result_changes
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeResultChanges:
+
+    @pytest.fixture
+    def matchups(self):
+        return [
+            {"roster_id": 1, "points": 100.0, "matchup_id": 1},
+            {"roster_id": 2, "points": 108.0, "matchup_id": 1},
+            {"roster_id": 3, "points": 120.0, "matchup_id": 2},
+            {"roster_id": 4, "points": 90.0, "matchup_id": 2},
+        ]
+
+    @pytest.fixture
+    def team_names(self):
+        return {1: "A", 2: "B", 3: "C", 4: "D"}
+
+    def test_chaos_flips_matchup_winner(self, matchups, team_names):
+        # +20 to roster 1 -> 120 > 108, flips the win from B to A.
+        result = chaos.analyze_result_changes(
+            matchups, {1: 20}, team_names=team_names
+        )
+
+        changes = result["matchup_changes"]
+        assert len(changes) == 1
+        assert changes[0]["base_winner"] == 2
+        assert changes[0]["adj_winner"] == 1
+
+    def test_chaos_can_create_a_tie(self, matchups, team_names):
+        # +8 to roster 1 -> 108 == 108, base winner B becomes a tie.
+        result = chaos.analyze_result_changes(
+            matchups, {1: 8}, team_names=team_names
+        )
+
+        assert result["matchup_changes"][0]["adj_winner"] is None
+
+    def test_no_change_when_adjustment_insufficient(self, matchups, team_names):
+        result = chaos.analyze_result_changes(
+            matchups, {1: 5}, team_names=team_names
+        )
+
+        assert result["matchup_changes"] == []
+
+    def test_high_scorer_changes(self, matchups, team_names):
+        # +20 to roster 1 (100->120) ties C's 120 and, first in order, takes
+        # the adjusted lead from C.
+        result = chaos.analyze_result_changes(
+            matchups, {1: 20}, team_names=team_names
+        )
+
+        high = result["high_scorer"]
+        assert high["base"]["name"] == "C"
+        assert high["adjusted"]["name"] == "A"
+        assert high["changed"] is True
+
+    def test_high_scorer_unchanged(self, matchups, team_names):
+        result = chaos.analyze_result_changes(
+            matchups, {}, team_names=team_names
+        )
+
+        assert result["high_scorer"]["changed"] is False
+
+    def test_manual_adjustments_are_added(self, matchups, team_names):
+        # Auto +5 and manual +5 to roster 1 -> 110 > 108, flips to A.
+        result = chaos.analyze_result_changes(
+            matchups, {1: 5}, manual_adjustments={1: 5}, team_names=team_names
+        )
+
+        assert result["matchup_changes"][0]["adj_winner"] == 1
+
+
+# ---------------------------------------------------------------------------
+# render_chaos_html
+# ---------------------------------------------------------------------------
+
+class TestRenderChaosHtml:
+
+    @pytest.fixture
+    def analysis(self):
+        return {
+            "matchup_changes": [{
+                "matchup_id": 1, "base_winner": 2, "adj_winner": 1,
+                "teams": [
+                    {"roster_id": 1, "name": "A", "base": 100.0,
+                     "chaos": 20, "adjusted": 120.0},
+                    {"roster_id": 2, "name": "B", "base": 108.0,
+                     "chaos": 0, "adjusted": 108.0},
+                ],
+            }],
+            "high_scorer": {
+                "base": {"roster_id": 3, "name": "C", "points": 120.0},
+                "adjusted": {"roster_id": 1, "name": "A", "points": 120.0},
+                "changed": True,
+            },
+        }
+
+    def _render(self, analysis):
+        return chaos.render_chaos_html(
+            week=3, season=2025, analysis=analysis,
+            adjustments={1: 20}, team_names={1: "A", 2: "B", 3: "C"},
+            audit_text="evidence <b>", league_name="League of Chaos",
+            generated="t",
+        )
+
+    def test_sets_lang(self, analysis):
+        assert 'lang="en"' in self._render(analysis)
+
+    def test_flags_result_flip(self, analysis):
+        assert "RESULT FLIP" in self._render(analysis)
+
+    def test_flags_payout_move(self, analysis):
+        assert "PAYOUT MOVES" in self._render(analysis)
+
+    def test_escapes_audit_text(self, analysis):
+        assert "evidence &lt;b&gt;" in self._render(analysis)
+
+    def test_adjustments_table_scoped_header(self, analysis):
+        assert '<th scope="col">Team</th>' in self._render(analysis)
+
+    def test_title_includes_week(self, analysis):
+        assert "Week 3 Chaos" in self._render(analysis)
