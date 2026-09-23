@@ -1,9 +1,12 @@
 name: Dynasty Trade Review
 
 # Manual, on-demand only (no schedule). Trigger from the Actions tab, enter a
-# league ID, and read the PAR report in the run's Job Summary (also uploaded as
-# a downloadable .txt artifact). trade_review.py needs only the public Sleeper
-# API and the `requests` package — no nflverse/pandas, so this stays fast.
+# league ID, and the PAR report is published as an HTML page on GitHub Pages
+# (one stable URL per league, so you can pin it in that league's chat). The
+# same report is also attached to the run's Job Summary and as a .txt artifact.
+#
+# The ~16 MB Sleeper player map is cached (actions/cache, keyed by date) so
+# repeated runs across leagues don't re-fetch it.
 
 on:
   workflow_dispatch:
@@ -32,12 +35,21 @@ on:
         default: false
         type: boolean
 
+# contents: write is needed to publish to the gh-pages branch.
 permissions:
-  contents: read
+  contents: write
+
+# Serialize publishes so concurrent league runs don't race on gh-pages.
+concurrency:
+  group: trade-review-pages
+  cancel-in-progress: false
 
 jobs:
   trade-review:
     runs-on: ubuntu-latest
+    env:
+      # File cache for the Sleeper player map; persisted across runs below.
+      SLEEPER_PLAYERS_FILE: .sleeper-cache/players-nfl.json
     steps:
       - uses: actions/checkout@v5
 
@@ -46,15 +58,27 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        # trade_review.py imports only `requests` (redis is optional and falls
-        # back to a live fetch when no server is reachable, which is the case in
-        # CI). Pinned to match requirements.txt.
+        # trade_review.py imports only `requests` (redis is optional and
+        # unused in CI; the file cache below stands in for it). Pinned to match
+        # requirements.txt.
         run: pip install "requests==2.34.2"
 
-      - name: Run trade review
+      - name: Date key for player-map cache
+        id: date
+        run: echo "today=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Sleeper player map
+        # The player map changes at most once a day, so key by UTC date: same
+        # day => cache hit (no 16 MB fetch); new day => fresh fetch + re-cache.
+        uses: actions/cache@v4
+        with:
+          path: .sleeper-cache
+          key: sleeper-players-${{ steps.date.outputs.today }}
+
+      - name: Run trade review (HTML)
         id: run
-        # Inputs are passed via env (never interpolated into the shell) to avoid
-        # script injection, and assembled into a quoted args array.
+        # Inputs are passed via env (never interpolated into the shell) to
+        # avoid script injection, and assembled into a quoted args array.
         env:
           LEAGUE_ID: ${{ inputs.league_id }}
           SEASON: ${{ inputs.season }}
@@ -68,25 +92,40 @@ jobs:
           if [ "$UNFLOORED" = "true" ]; then args+=(--unfloored); fi
           if [ "$RAW_POINTS" = "true" ]; then args+=(--raw-points); fi
 
+          # Plain text (for the summary + artifact) and HTML (for Pages).
           python trade_review.py "${args[@]}" | tee report.txt
-          code=${PIPESTATUS[0]}
-          if [ "$code" -ne 0 ]; then
-            echo "trade_review.py exited $code" >&2
-            exit "$code"
-          fi
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "trade_review failed" >&2; exit 1; }
 
-      - name: Publish report to job summary
+          mkdir -p public/leagues
+          python trade_review.py "${args[@]}" --html > "public/leagues/${LEAGUE_ID}.html"
+
+      - name: Publish to GitHub Pages (per-league, additive)
+        # keep_files: true preserves other leagues' pages already on gh-pages.
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          keep_files: true
+          commit_message: "pages: trade review for league ${{ inputs.league_id }}"
+
+      - name: Link + report to job summary
         if: always()
         env:
           LEAGUE_ID: ${{ inputs.league_id }}
           SEASON: ${{ inputs.season }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
         run: |
+          repo_name="${REPO#*/}"
+          url="https://${OWNER}.github.io/${repo_name}/leagues/${LEAGUE_ID}.html"
           {
             echo "## Dynasty Trade Review"
             echo "League \`${LEAGUE_ID}\`${SEASON:+ · season ${SEASON}}"
             echo ""
+            echo "**Shareable page:** ${url}"
+            echo ""
             echo '```text'
-            if [ -f report.txt ]; then cat report.txt; else echo "(no output — run step failed)"; fi
+            if [ -f report.txt ]; then cat report.txt; else echo "(no output — run failed)"; fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -95,5 +134,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: trade-review-report
-          path: report.txt
+          path: |
+            report.txt
+            public/leagues/*.html
           if-no-files-found: warn
