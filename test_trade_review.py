@@ -1568,3 +1568,86 @@ class TestAnnotateReviewManagers:
         tr.annotate_review_managers(reviews, directory)
 
         assert reviews[0]["managers"] == ["Orphan Team"]
+
+
+# ---------------------------------------------------------------------------
+# hold_window_end — same-week re-trades (offseason double-count regression)
+# ---------------------------------------------------------------------------
+
+class TestHoldWindowSameWeek:
+
+    @pytest.fixture
+    def timeline(self):
+        # Cook acquired by roster 1 (seq 100), flipped to roster 2 (seq 200),
+        # both filed 2023 week 1 — the classic offseason two-hop.
+        chain = [{"league_id": "L", "season": "2023"}]
+        txns = {
+            ("L", 1): [
+                {"status": "complete", "status_updated": 100,
+                 "adds": {"cook": 1}, "drops": {}},
+                {"status": "complete", "status_updated": 200,
+                 "adds": {"cook": 2}, "drops": {"cook": 1}},
+            ],
+        }
+        return tr.build_ownership_timeline(
+            chain, fetch=lambda lid, wk: txns.get((lid, wk), []),
+            weeks=range(1, 3),
+        )
+
+    def test_intermediate_owner_window_ends_same_week(self, timeline):
+        # Roster 1 flipped Cook the same week -> window ends (was the bug that
+        # left it None, crediting Cook to both trades).
+        assert tr.hold_window_end(timeline, "cook", 1, "2023", 1, 100) == (
+            "2023", 1
+        )
+
+    def test_final_owner_still_holds(self, timeline):
+        assert tr.hold_window_end(timeline, "cook", 2, "2023", 1, 200) is None
+
+    def test_sequence_is_required_to_disambiguate(self, timeline):
+        # Guard: without the acquiring sequence the earlier same-week add to
+        # roster 1 wrongly bounds roster 2 — this is why start_seq exists.
+        assert tr.hold_window_end(timeline, "cook", 2, "2023", 1, 0) == (
+            "2023", 1
+        )
+
+
+# ---------------------------------------------------------------------------
+# Offseason trade label
+# ---------------------------------------------------------------------------
+
+class TestOffseasonLabel:
+
+    @staticmethod
+    def _ms(year, month, day):
+        from datetime import datetime, timezone
+        return int(
+            datetime(year, month, day, tzinfo=timezone.utc).timestamp() * 1000
+        )
+
+    def test_week1_before_september_is_offseason(self):
+        review = {"season": "2023", "week": 1,
+                  "status_updated": self._ms(2023, 6, 1)}
+
+        assert tr.format_trade_when(review) == "2023 offseason"
+
+    def test_week1_in_september_is_in_season(self):
+        review = {"season": "2023", "week": 1,
+                  "status_updated": self._ms(2023, 9, 10)}
+
+        assert tr.format_trade_when(review) == "2023 wk1"
+
+    def test_later_week_always_wk(self):
+        review = {"season": "2023", "week": 5,
+                  "status_updated": self._ms(2023, 10, 1)}
+
+        assert tr.format_trade_when(review) == "2023 wk5"
+
+    def test_week1_without_timestamp_defaults_in_season(self):
+        review = {"season": "2023", "week": 1, "status_updated": None}
+
+        assert tr.format_trade_when(review) == "2023 wk1"
+
+    def test_is_offseason_trade_boolean(self):
+        assert tr.is_offseason_trade("2023", 1, self._ms(2023, 3, 1)) is True
+        assert tr.is_offseason_trade("2023", 1, self._ms(2023, 9, 2)) is False
