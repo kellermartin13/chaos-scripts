@@ -1904,6 +1904,14 @@ def _par_lineage_line(asset):
 
 
 def _par_takeaway(review, winner):
+    if review.get("chained") and review.get("chain_note"):
+        note = review["chain_note"]
+        return (
+            f"\u2192 Chained trade: {note['team']} flipped {note['asset']} "
+            f"onward (see T{note['trade_no']}) — single-trade PAR understates "
+            "their return."
+        )
+
     if winner is None:
         return "\u2192 Even by PAR."
 
@@ -1923,9 +1931,48 @@ def _par_takeaway(review, winner):
     return note
 
 
+def flag_chained_trades(reviews):
+    """
+    Reclassify trades where a *losing* side flipped a received asset onward.
+
+    When a side that lost the per-trade PAR comparison later re-traded one of
+    the assets it received (the asset carries a lineage link), its single-trade
+    PAR understates what it actually got — the value left via the next trade.
+    Labeling such a trade LOPSIDED/HEIST would misread a deliberate pass-through
+    as a fleecing (e.g. acquiring a stud and immediately flipping him). Mark it
+    "chained" and drop the lopsided flag; PAR numbers are unchanged and the ↳
+    links show where the value went. Run after attach_lineage.
+    """
+
+    for review in reviews:
+        review["chained"] = False
+        winner = review["winner_roster"]
+        if winner is None:
+            continue
+
+        for roster_id, side in review["sides"].items():
+            if roster_id == winner:
+                continue
+            for asset in side["assets"]:
+                became = asset.get("became")
+                if became and became.get("trade_no"):
+                    review["chained"] = True
+                    review["chain_note"] = {
+                        "team": side["label"],
+                        "asset": asset["name"],
+                        "trade_no": became["trade_no"],
+                    }
+                    review["lopsided"] = None  # not a heist — a pass-through
+                    break
+            if review["chained"]:
+                break
+
+
 def render_par_highlight(rank, review):
     lines = []
-    tag = (review["lopsided"] or "notable").upper()
+    tag = "CHAINED" if review.get("chained") else (
+        review["lopsided"] or "notable"
+    ).upper()
     when = format_trade_when(review)
     lines.append(
         f"\n#{rank}  [T{review['trade_no']}]  {tag} · {when} · "
@@ -1977,7 +2024,9 @@ def render_par_index_entry(review):
     winner = review["winner_roster"]
 
     bits = [f"T{review['trade_no']:<4}{when}"]
-    if review["lopsided"]:
+    if review.get("chained"):
+        bits.append("CHAINED")
+    elif review["lopsided"]:
         bits.append(review["lopsided"].upper())
     if winner is None:
         bits.append("even")
@@ -2105,6 +2154,7 @@ def _html_shell(title, body_html, generated=None):
     font-weight:700; letter-spacing:.03em; }}
   .badge.heist {{ background:#da3633; color:#fff; }}
   .badge.lopsided {{ background:#9e6a03; color:#fff; }}
+  .badge.chained {{ background:#6e7681; color:#fff; }}
   .tag.win {{ background:#238636; color:#fff; padding:.05rem .45rem; border-radius:6px; font-size:.72rem; font-weight:700; }}
   .pos {{ display:inline-block; background:#21262d; color:#adbac7; border:1px solid #30363d;
     border-radius:5px; padding:0 .35rem; font-size:.7rem; margin-left:.35rem; }}
@@ -2247,9 +2297,12 @@ def _html_trade_card(review, rank=None, detailed=False, anchor=False):
     if rank is not None:
         head_bits.append(f'<span class="rank">#{rank}</span>')
     head_bits.append(f'<span class="tno">T{review["trade_no"]}</span>')
-    badge = _html_class_badge(review["lopsided"])
-    if badge:
-        head_bits.append(badge)
+    if review.get("chained"):
+        head_bits.append('<span class="badge chained">CHAINED</span>')
+    else:
+        badge = _html_class_badge(review["lopsided"])
+        if badge:
+            head_bits.append(badge)
     head_bits.append(f'<span class="when">{_h(when)}</span>')
     head_bits.append(
         f'<span class="elapsed">{review["seasons_elapsed"]} seasons elapsed</span>'
@@ -2600,6 +2653,7 @@ def main():
 
     reviews = [build_par_review(trade, ctx) for trade in trades]
     attach_lineage(reviews, trades)
+    flag_chained_trades(reviews)
     annotate_review_managers(reviews, directory)
     overview = compute_manager_overview(
         reviews, directory["owner_by_season_roster"]

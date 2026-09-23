@@ -1674,3 +1674,94 @@ class TestOffseasonLabel:
     def test_is_offseason_trade_boolean(self):
         assert tr.is_offseason_trade("2023", 1, self._ms(2023, 3, 1)) is True
         assert tr.is_offseason_trade("2023", 1, self._ms(2023, 9, 2)) is False
+
+
+# ---------------------------------------------------------------------------
+# flag_chained_trades (don't call a pass-through a heist)
+# ---------------------------------------------------------------------------
+
+class TestFlagChainedTrades:
+
+    @staticmethod
+    def _review(winner, lopsided, sides):
+        return {
+            "trade_no": 8, "season": "2023", "week": 1,
+            "winner_roster": winner, "margin": 90.0, "lopsided": lopsided,
+            "sides": sides,
+        }
+
+    def test_loser_flipped_asset_becomes_chained(self):
+        reviews = [self._review(2, "heist", {
+            1: {"label": "Team Thompson", "assets": [
+                {"name": "James Cook",
+                 "became": {"trade_no": 9, "assets": ["Spiller"]}},
+                {"name": "Dulcich", "became": None}]},
+            2: {"label": "Ravens", "assets": [
+                {"name": "Schultz", "became": None}]},
+        })]
+
+        tr.flag_chained_trades(reviews)
+
+        assert reviews[0]["chained"] is True
+
+    def test_chained_drops_the_lopsided_flag(self):
+        reviews = [self._review(2, "heist", {
+            1: {"label": "L", "assets": [
+                {"name": "Cook", "became": {"trade_no": 9, "assets": ["x"]}}]},
+            2: {"label": "W", "assets": [{"name": "S", "became": None}]},
+        })]
+
+        tr.flag_chained_trades(reviews)
+
+        assert reviews[0]["lopsided"] is None
+
+    def test_chain_note_captures_asset_and_target(self):
+        reviews = [self._review(2, "heist", {
+            1: {"label": "Team Thompson", "assets": [
+                {"name": "James Cook",
+                 "became": {"trade_no": 9, "assets": ["Spiller"]}}]},
+            2: {"label": "Ravens", "assets": [{"name": "S", "became": None}]},
+        })]
+
+        tr.flag_chained_trades(reviews)
+
+        note = reviews[0]["chain_note"]
+        assert note["asset"] == "James Cook" and note["trade_no"] == 9
+
+    def test_only_winner_flipped_stays_lopsided(self):
+        # Winner flipped an asset but still won on what it kept — real result.
+        reviews = [self._review(1, "heist", {
+            1: {"label": "W", "assets": [
+                {"name": "A", "became": {"trade_no": 2, "assets": ["x"]}}]},
+            2: {"label": "L", "assets": [{"name": "B", "became": None}]},
+        })]
+
+        tr.flag_chained_trades(reviews)
+
+        assert reviews[0]["chained"] is False
+        assert reviews[0]["lopsided"] == "heist"
+
+    def test_dropped_asset_does_not_chain(self):
+        reviews = [self._review(2, "heist", {
+            1: {"label": "L", "assets": [
+                {"name": "Bust", "became": {"dropped": True}}]},
+            2: {"label": "W", "assets": [{"name": "S", "became": None}]},
+        })]
+
+        tr.flag_chained_trades(reviews)
+
+        assert reviews[0]["chained"] is False
+        assert reviews[0]["lopsided"] == "heist"
+
+    def test_takeaway_reports_chain(self):
+        reviews = [self._review(2, "heist", {
+            1: {"label": "Team Thompson", "assets": [
+                {"name": "James Cook",
+                 "became": {"trade_no": 9, "assets": ["Spiller"]}}]},
+            2: {"label": "Ravens", "assets": [{"name": "S", "became": None}]},
+        })]
+        tr.flag_chained_trades(reviews)
+
+        out = tr._par_takeaway(reviews[0], 2)
+
+        assert "Chained trade" in out and "James Cook" in out and "see T9" in out
