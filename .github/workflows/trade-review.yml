@@ -118,6 +118,10 @@ jobs:
         run: |
           repo_name="${REPO#*/}"
           url="https://${OWNER}.github.io/${repo_name}/leagues/${LEAGUE_ID}.html"
+          # Surface the link three ways: step log, a run-level annotation, and
+          # the Job Summary (the annotation shows at the very top of the run).
+          echo "Trade review page: ${url}"
+          echo "::notice title=Trade Review page::${url}"
           {
             echo "## Dynasty Trade Review"
             echo "League \`${LEAGUE_ID}\`${SEASON:+ · season ${SEASON}}"

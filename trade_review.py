@@ -1981,18 +1981,16 @@ def _report_title(league_name, season=None):
     return f"{base} · {season}" if season else base
 
 
-def wrap_report_html(report_text, title, generated=None):
+def _html_shell(title, body_html, generated=None):
     """
-    Wrap a monospace text report in a minimal, self-contained HTML page for
-    GitHub Pages. The report is HTML-escaped and dropped into a <pre>, so the
-    fixed-width alignment (columns, box-drawing, trajectories) is preserved.
+    Full HTML document: <head> with embedded CSS + the given body HTML. Shared
+    by the rich PAR report and the plain-text (<pre>) fallback.
     """
 
     if generated is None:
         generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     safe_title = html.escape(title)
-    body = html.escape(report_text)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -2001,24 +1999,296 @@ def wrap_report_html(report_text, title, generated=None):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{safe_title}</title>
 <style>
-  body {{ margin:0; background:#0d1117; color:#e6edf3;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
-  header {{ padding:1rem 1.25rem; border-bottom:1px solid #30363d; }}
-  h1 {{ font-size:1.05rem; margin:0; }}
-  .meta {{ color:#8b949e; font-size:.8rem; margin-top:.3rem; }}
-  pre {{ padding:1.25rem; margin:0; overflow-x:auto; font-size:.82rem;
-    line-height:1.4; white-space:pre; }}
+  :root {{ color-scheme: dark; }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin:0; background:#0d1117; color:#e6edf3; line-height:1.5;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }}
+  main {{ max-width: 960px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }}
+  header.page {{ border-bottom:1px solid #30363d; padding-bottom:1rem; margin-bottom:1.5rem; }}
+  h1 {{ font-size:1.6rem; margin:0 0 .35rem; }}
+  h2 {{ font-size:1.15rem; margin:2rem 0 .75rem; padding-bottom:.35rem; border-bottom:1px solid #21262d; }}
+  h3 {{ font-size:1rem; margin:0; }}
+  .meta {{ color:#8b949e; font-size:.9rem; }}
+  code {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
+  a {{ color:#58a6ff; }}
+  .muted {{ color:#8b949e; }}
+  .num {{ font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
+
+  .trade {{ border:1px solid #30363d; border-radius:10px; padding:1rem 1.1rem; margin:0 0 1rem;
+    background:#0f141a; }}
+  .trade > .thead {{ display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; margin-bottom:.75rem; }}
+  .rank {{ font-weight:700; color:#8b949e; }}
+  .tno {{ color:#8b949e; font-size:.85rem; }}
+  .when {{ color:#adbac7; }}
+  .elapsed {{ color:#8b949e; font-size:.82rem; margin-left:auto; }}
+
+  .badge {{ display:inline-block; padding:.08rem .5rem; border-radius:999px; font-size:.72rem;
+    font-weight:700; letter-spacing:.03em; }}
+  .badge.heist {{ background:#da3633; color:#fff; }}
+  .badge.lopsided {{ background:#9e6a03; color:#fff; }}
+  .tag.win {{ background:#238636; color:#fff; padding:.05rem .45rem; border-radius:6px; font-size:.72rem; font-weight:700; }}
+  .pos {{ display:inline-block; background:#21262d; color:#adbac7; border:1px solid #30363d;
+    border-radius:5px; padding:0 .35rem; font-size:.7rem; margin-left:.35rem; }}
+  .pill {{ display:inline-block; background:#161b22; color:#adbac7; border:1px solid #21262d;
+    border-radius:5px; padding:0 .4rem; margin:.1rem .25rem .1rem 0; font-size:.75rem; }}
+
+  .side {{ border:1px solid #21262d; border-radius:8px; padding:.6rem .75rem; margin:.5rem 0; }}
+  .side.win {{ border-left:3px solid #238636; }}
+  .side-head {{ display:flex; flex-wrap:wrap; align-items:baseline; gap:.5rem; }}
+  .team {{ font-weight:600; }}
+  .par {{ font-weight:700; }}
+  .par.pos {{ color:#3fb950; background:none; border:none; }}
+  .traj {{ margin:.4rem 0 .1rem; }}
+  ul.assets {{ list-style:none; margin:.5rem 0 0; padding:0; }}
+  ul.assets li {{ padding:.15rem 0; border-top:1px dashed #21262d; }}
+  ul.assets li:first-child {{ border-top:none; }}
+  .lineage {{ display:block; color:#8b949e; font-size:.82rem; margin:.1rem 0 .1rem 1rem; }}
+  .takeaway {{ margin:.6rem 0 0; font-style:italic; color:#adbac7; }}
+
+  table {{ border-collapse:collapse; width:100%; margin-top:.5rem; font-size:.9rem; }}
+  caption {{ text-align:left; color:#8b949e; font-size:.82rem; margin-bottom:.4rem; }}
+  th, td {{ text-align:left; padding:.4rem .6rem; border-bottom:1px solid #21262d; }}
+  th[scope="col"] {{ color:#adbac7; border-bottom:1px solid #30363d; }}
+  td.num, th.num {{ text-align:right; }}
+  tbody tr:hover {{ background:#11161d; }}
+
+  @media (max-width:600px) {{
+    .elapsed {{ margin-left:0; width:100%; }}
+    h1 {{ font-size:1.35rem; }}
+  }}
 </style>
 </head>
 <body>
-<header>
-<h1>{safe_title}</h1>
-<div class="meta">Generated {html.escape(generated)} · Points Above Replacement</div>
-</header>
-<pre>{body}</pre>
+<main>
+{body_html}
+<footer class="meta" style="margin-top:2rem;border-top:1px solid #30363d;padding-top:1rem;">
+Generated {html.escape(generated)} · Points Above Replacement (PAR)
+</footer>
+</main>
 </body>
 </html>
 """
+
+
+def wrap_report_html(report_text, title, generated=None):
+    """
+    Plain-text fallback: HTML-escape a monospace report and drop it into a
+    <pre> (used for --raw-points --html, which has a different data shape).
+    """
+
+    return _html_shell(title, f"<pre>{html.escape(report_text)}</pre>", generated)
+
+
+# --- rich HTML renderers (data-driven; used for the default PAR report) -----
+
+def _h(value):
+    return html.escape(str(value))
+
+
+def _html_class_badge(lopsided):
+    if lopsided == "heist":
+        return '<span class="badge heist">HEIST</span>'
+    if lopsided == "lopsided":
+        return '<span class="badge lopsided">LOPSIDED</span>'
+    return ""
+
+
+def _html_pos(position):
+    return f'<span class="pos">{_h(position)}</span>' if position else ""
+
+
+def _html_traj(by_season):
+    if not by_season:
+        return ""
+    pills = "".join(
+        f'<span class="pill num">{season[2:]}:{value:+.0f}</span>'
+        for season, value in by_season.items()
+    )
+    return f'<div class="traj">{pills}</div>'
+
+
+def _html_lineage(asset):
+    became = asset.get("became")
+    if not became:
+        return ""
+    if became.get("dropped"):
+        return '<span class="lineage">↳ later dropped — lineage ends</span>'
+    names = ", ".join(_h(n) for n in became["assets"]) or "picks/FAAB"
+    no = became["trade_no"]
+    return (
+        f'<span class="lineage">↳ became: {names} '
+        f'<a href="#t{no}">(see T{no})</a></span>'
+    )
+
+
+def _html_asset(asset, detailed):
+    pos = _html_pos(asset["position"])
+    par_cls = "par pos" if asset["par"] > 0 else "par"
+    line = (
+        f'{_h(asset["name"])}{pos} '
+        f'<span class="{par_cls} num">{asset["par"]:.1f} PAR</span>'
+    )
+    if detailed:
+        line += (
+            f' <span class="muted num">{asset["par_pg"]:.1f}/G</span>'
+            f' <span class="muted">· {_h(asset["hold"])}</span>'
+        )
+        lineage = _html_lineage(asset)
+        if lineage:
+            line += lineage
+    return f"<li>{line}</li>"
+
+
+def _html_side(roster_id, side, winner, margin, detailed):
+    win = roster_id == winner
+    classes = "side win" if win else "side"
+    tag = (
+        f'<span class="tag win">WON +{margin:.1f}</span>'
+        if win and margin
+        else ""
+    )
+    head = (
+        '<div class="side-head">'
+        f'<span class="team">{_h(side["label"])}</span>'
+        f'<span class="par num">{side["par"]:.1f} PAR</span>'
+        f'<span class="muted num">{side["par_pg"]:.1f}/G · '
+        f'{side["points"]:.0f} pts</span>{tag}</div>'
+    )
+    traj = _html_traj(side["by_season"]) if detailed else ""
+    assets = "".join(_html_asset(a, detailed) for a in side["assets"])
+    return f'<div class="{classes}">{head}{traj}<ul class="assets">{assets}</ul></div>'
+
+
+def _html_trade_card(review, rank=None, detailed=False, anchor=False):
+    when = f'{review["season"]} wk{review["week"]}'
+    winner = review["winner_roster"]
+    margin = review["margin"]
+
+    head_bits = []
+    if rank is not None:
+        head_bits.append(f'<span class="rank">#{rank}</span>')
+    head_bits.append(f'<span class="tno">T{review["trade_no"]}</span>')
+    badge = _html_class_badge(review["lopsided"])
+    if badge:
+        head_bits.append(badge)
+    head_bits.append(f'<span class="when">{_h(when)}</span>')
+    head_bits.append(
+        f'<span class="elapsed">{review["seasons_elapsed"]} seasons elapsed</span>'
+    )
+    thead = f'<div class="thead">{"".join(head_bits)}</div>'
+
+    ordered = sorted(
+        review["sides"].items(), key=lambda kv: kv[1]["par"], reverse=True
+    )
+    sides = "".join(
+        _html_side(rid, side, winner, margin, detailed)
+        for rid, side in ordered
+    )
+
+    takeaway = ""
+    if detailed:
+        text = _par_takeaway(review, winner).lstrip("→ ").strip()
+        takeaway = f'<p class="takeaway">{_h(text)}</p>'
+
+    attr = f' id="t{review["trade_no"]}"' if anchor else ""
+    return f'<article class="trade"{attr}>{thead}{sides}{takeaway}</article>'
+
+
+def _html_manager_section(overview, manager_names):
+    if not overview:
+        return ""
+
+    def name_of(owner_id):
+        return manager_names.get(owner_id) or "Unknown manager"
+
+    ranks = manager_rankings(overview)
+    cards = (
+        f'<p class="meta">Best: <strong>{_h(name_of(ranks["best"]))}</strong> '
+        f'({overview[ranks["best"]]["net"]:+.1f} net PAR) · '
+        f'Worst: <strong>{_h(name_of(ranks["worst"]))}</strong> '
+        f'({overview[ranks["worst"]]["net"]:+.1f}) · '
+        f'Most active: <strong>{_h(name_of(ranks["most_active"]))}</strong> '
+        f'({overview[ranks["most_active"]]["trades"]} trades)</p>'
+    )
+
+    rows = ""
+    ordered = sorted(overview.items(), key=lambda kv: kv[1]["net"], reverse=True)
+    for i, (owner_id, e) in enumerate(ordered, start=1):
+        record = f'{e["wins"]}-{e["losses"]}-{e["ties"]}'
+        rows += (
+            f"<tr><td class='num'>{i}</td><td>{_h(name_of(owner_id))}</td>"
+            f"<td class='num'>{e['trades']}</td><td class='num'>{record}</td>"
+            f"<td class='num'>{e['received']:.1f}</td>"
+            f"<td class='num'>{e['net']:+.1f}</td></tr>"
+        )
+
+    table = (
+        '<table><caption>Ranked by net PAR</caption><thead><tr>'
+        '<th scope="col" class="num">#</th><th scope="col">Manager</th>'
+        '<th scope="col" class="num">Trades</th><th scope="col" class="num">W-L-T</th>'
+        '<th scope="col" class="num">Received</th><th scope="col" class="num">Net PAR</th>'
+        f'</tr></thead><tbody>{rows}</tbody></table>'
+    )
+    return (
+        '<section aria-labelledby="mgr-h"><h2 id="mgr-h">Manager Leaderboard</h2>'
+        f'{cards}{table}</section>'
+    )
+
+
+def render_html_report(
+    reviews, overview, manager_names, league_name=None, season=None,
+    top=12, floored=True, generated=None,
+):
+    """
+    Build the rich, styled HTML report (highlight cards, per-season
+    trajectories, clickable lineage links, and a manager leaderboard table)
+    from the review data — not from the text report.
+    """
+
+    title = _report_title(league_name, season)
+    mode = "floored (value-when-startable)" if floored else "literal WAR"
+
+    if not reviews:
+        body = (
+            f'<header class="page"><h1>{_h(title)}</h1></header>'
+            "<p>No completed trades found.</p>"
+        )
+        return _html_shell(title, body, generated)
+
+    seasons = sorted({r["season"] for r in reviews})
+    header = (
+        '<header class="page">'
+        f'<h1>{_h(title)}</h1>'
+        f'<p class="meta">{len(reviews)} trades · {seasons[0]}–{seasons[-1]} · '
+        f'PAR mode: {mode} · production counted only while the receiving team '
+        'held the asset</p></header>'
+    )
+
+    ranked = sorted(reviews, key=lambda r: r["margin"], reverse=True)
+    highlights = "".join(
+        _html_trade_card(r, rank=i, detailed=True)
+        for i, r in enumerate(ranked[:top], start=1)
+    )
+    highlights_section = (
+        '<section aria-labelledby="hi-h">'
+        f'<h2 id="hi-h">Top {min(top, len(ranked))} Highlights</h2>'
+        f'{highlights}</section>'
+    )
+
+    all_cards = "".join(
+        _html_trade_card(r, detailed=False, anchor=True) for r in reviews
+    )
+    all_section = (
+        '<section aria-labelledby="all-h"><h2 id="all-h">All Trades</h2>'
+        f'{all_cards}</section>'
+    )
+
+    manager_section = _html_manager_section(overview, manager_names)
+
+    return _html_shell(
+        title, header + highlights_section + all_section + manager_section,
+        generated,
+    )
 
 
 # =============================================================================
@@ -2119,8 +2389,6 @@ def main():
     log("Building manager directory...")
     directory = build_manager_directory(chain)
 
-    # Build the report writer for the selected mode, then emit it either as
-    # plain text or wrapped in HTML.
     if args.raw_points:
         log("Collecting trades and scoring raw production since each...")
         reviews = build_all_reviews(chain, players, season_filter=args.season)
@@ -2131,69 +2399,73 @@ def main():
         def write():
             print_report(reviews, team_names_by_season, league_name=league_name)
             print_manager_overview(overview, directory["names"])
-    else:
-        log("Collecting trades, ownership timeline, and replacement baselines...")
-        chain_index = index_chain(chain)
 
-        # Share one memoized pass of the transaction log across trade
-        # collection and the ownership timeline (both scan every week), so each
-        # week's transactions is fetched once, not twice. Likewise share a
-        # single WeeklyStatsCache between the report and the replacement
-        # baselines. Together these halve the two largest Sleeper call buckets
-        # and keep us well clear of the ~1000 req/min guidance.
-        _txn_cache = {}
+        if args.html:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                write()
+            print(wrap_report_html(
+                buffer.getvalue(), _report_title(league_name, args.season)
+            ))
+        else:
+            write()
+        return
 
-        def txn_fetch(league_id, week):
-            key = (league_id, week)
-            if key not in _txn_cache:
-                _txn_cache[key] = get_transactions(league_id, week)
-            return _txn_cache[key]
+    log("Collecting trades, ownership timeline, and replacement baselines...")
+    chain_index = index_chain(chain)
 
-        stats_cache = WeeklyStatsCache()
+    # Share one memoized pass of the transaction log across trade
+    # collection and the ownership timeline (both scan every week), so each
+    # week's transactions is fetched once, not twice. Likewise share a
+    # single WeeklyStatsCache between the report and the replacement
+    # baselines. Together these halve the two largest Sleeper call buckets
+    # and keep us well clear of the ~1000 req/min guidance.
+    _txn_cache = {}
 
-        trades = collect_trades(chain, fetch=txn_fetch)
-        if args.season:
-            trades = [t for t in trades if t["season"] == str(args.season)]
+    def txn_fetch(league_id, week):
+        key = (league_id, week)
+        if key not in _txn_cache:
+            _txn_cache[key] = get_transactions(league_id, week)
+        return _txn_cache[key]
 
-        ctx = {
-            "chain_index": chain_index,
-            "players": players,
-            "pick_index": build_pick_index(chain),
-            "team_names": team_names_by_season,
-            "stats_cache": stats_cache,
-            "timeline": build_ownership_timeline(chain, fetch=txn_fetch),
-            "floor": not args.unfloored,
-            "baseline_cache": ReplacementBaselineCache(
-                chain_index, players, stats_cache,
-                build_replacement_ranks_by_season(chain_index), band=args.band,
-            ),
-        }
+    stats_cache = WeeklyStatsCache()
 
-        reviews = [build_par_review(trade, ctx) for trade in trades]
-        attach_lineage(reviews, trades)
-        overview = compute_manager_overview(
-            reviews, directory["owner_by_season_roster"]
-        )
+    trades = collect_trades(chain, fetch=txn_fetch)
+    if args.season:
+        trades = [t for t in trades if t["season"] == str(args.season)]
 
-        def write():
-            print_par_report(
-                reviews, league_name=league_name, top=args.top,
-                floored=ctx["floor"],
-            )
-            print_manager_overview(overview, directory["names"], unit="PAR")
+    ctx = {
+        "chain_index": chain_index,
+        "players": players,
+        "pick_index": build_pick_index(chain),
+        "team_names": team_names_by_season,
+        "stats_cache": stats_cache,
+        "timeline": build_ownership_timeline(chain, fetch=txn_fetch),
+        "floor": not args.unfloored,
+        "baseline_cache": ReplacementBaselineCache(
+            chain_index, players, stats_cache,
+            build_replacement_ranks_by_season(chain_index), band=args.band,
+        ),
+    }
+
+    reviews = [build_par_review(trade, ctx) for trade in trades]
+    attach_lineage(reviews, trades)
+    overview = compute_manager_overview(
+        reviews, directory["owner_by_season_roster"]
+    )
 
     if args.html:
-        buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
-            write()
-        print(
-            wrap_report_html(
-                buffer.getvalue(),
-                _report_title(league_name, args.season),
-            )
-        )
+        print(render_html_report(
+            reviews, overview, directory["names"],
+            league_name=league_name, season=args.season,
+            top=args.top, floored=ctx["floor"],
+        ))
     else:
-        write()
+        print_par_report(
+            reviews, league_name=league_name, top=args.top,
+            floored=ctx["floor"],
+        )
+        print_manager_overview(overview, directory["names"], unit="PAR")
 
 
 if __name__ == "__main__":

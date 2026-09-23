@@ -1404,3 +1404,103 @@ class TestReportTitle:
 
     def test_falls_back_to_dynasty_without_name(self):
         assert tr._report_title(None) == "Dynasty — Trade Review (PAR)"
+
+
+# ---------------------------------------------------------------------------
+# render_html_report (rich, data-driven HTML)
+# ---------------------------------------------------------------------------
+
+class TestRenderHtmlReport:
+
+    @staticmethod
+    def _asset(name, par, position="WR", became=None):
+        return {
+            "name": name, "position": position, "player_id": name.lower(),
+            "resolved": True, "par": par, "par_pg": 5.0, "points": par * 2,
+            "games": 10, "hold": "held 1 seas", "seasons": 1,
+            "by_season": {"2020": par}, "end": None, "became": became,
+        }
+
+    @staticmethod
+    def _side(label, par, assets, by_season=None):
+        return {
+            "label": label, "par": par, "points": par * 2, "par_pg": 5.0,
+            "assets": assets, "by_season": by_season or {"2020": par},
+        }
+
+    @pytest.fixture
+    def reviews(self):
+        return [
+            {
+                "trade_no": 1, "season": "2020", "week": 1,
+                "seasons_elapsed": 5, "winner_roster": 1, "margin": 450.0,
+                "lopsided": "heist",
+                "sides": {
+                    1: self._side("Winner <A>", 500.0, [
+                        self._asset("Diggs & Co", 500.0,
+                                    became={"trade_no": 2, "assets": ["Chase"]}),
+                    ]),
+                    2: self._side("Loser", 50.0, [self._asset("Scrub", 50.0)]),
+                },
+            },
+            {
+                "trade_no": 2, "season": "2022", "week": 1,
+                "seasons_elapsed": 3, "winner_roster": 1, "margin": 60.0,
+                "lopsided": None,
+                "sides": {
+                    1: self._side("Winner <A>", 80.0, [self._asset("Chase", 80.0)]),
+                    2: self._side("Other", 20.0, [self._asset("X", 20.0)]),
+                },
+            },
+        ]
+
+    @pytest.fixture
+    def overview(self):
+        return {
+            "u1": {"trades": 2, "wins": 2, "losses": 0, "ties": 0,
+                   "received": 580.0, "net": 510.0},
+            "u2": {"trades": 2, "wins": 0, "losses": 2, "ties": 0,
+                   "received": 70.0, "net": -510.0},
+        }
+
+    @pytest.fixture
+    def names(self):
+        return {"u1": "Winner <A>", "u2": "Loser"}
+
+    def _render(self, reviews, overview, names, league="My & League"):
+        return tr.render_html_report(
+            reviews, overview, names, league_name=league, season=None,
+            top=12, floored=True, generated="t",
+        )
+
+    def test_sets_lang(self, reviews, overview, names):
+        assert 'lang="en"' in self._render(reviews, overview, names)
+
+    def test_escapes_league_name_in_title(self, reviews, overview, names):
+        out = self._render(reviews, overview, names)
+
+        assert "My &amp; League — Trade Review (PAR)" in out
+
+    def test_escapes_asset_name(self, reviews, overview, names):
+        assert "Diggs &amp; Co" in self._render(reviews, overview, names)
+
+    def test_renders_heist_badge(self, reviews, overview, names):
+        assert '<span class="badge heist">HEIST</span>' in self._render(
+            reviews, overview, names
+        )
+
+    def test_lineage_links_to_target_trade(self, reviews, overview, names):
+        assert 'href="#t2"' in self._render(reviews, overview, names)
+
+    def test_all_trades_card_has_anchor_id(self, reviews, overview, names):
+        assert 'id="t2"' in self._render(reviews, overview, names)
+
+    def test_manager_table_has_scoped_headers(self, reviews, overview, names):
+        assert '<th scope="col">Manager</th>' in self._render(
+            reviews, overview, names
+        )
+
+    def test_empty_reviews_render_message(self, overview, names):
+        out = tr.render_html_report([], overview, names, generated="t")
+
+        assert "No completed trades found." in out
