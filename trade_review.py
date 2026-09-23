@@ -32,6 +32,7 @@ import argparse
 import contextlib
 import html
 import io
+import json
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -1812,6 +1813,26 @@ def attach_lineage(reviews, trades):
                 }
 
 
+def annotate_review_managers(reviews, directory):
+    """
+    Tag each review with the stable manager identities of its participants so
+    the HTML report can filter by manager (a manager who renamed their team
+    across seasons still resolves to one identity). Sets review["managers"] to
+    a sorted list of manager names, falling back to the per-season team label
+    when an owner can't be resolved.
+    """
+
+    owner_by = directory.get("owner_by_season_roster", {})
+    names = directory.get("names", {})
+
+    for review in reviews:
+        managers = set()
+        for roster_id, side in review["sides"].items():
+            owner_id = owner_by.get((review["season"], roster_id))
+            managers.add(names.get(owner_id) or side["label"])
+        review["managers"] = sorted(managers)
+
+
 def _par_traj(by_season):
     """Compact per-season trajectory, e.g. '19:+540  20:+310'."""
 
@@ -2014,6 +2035,16 @@ def _html_shell(title, body_html, generated=None):
   .muted {{ color:#8b949e; }}
   .num {{ font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
 
+  .filterbar {{ position:sticky; top:0; z-index:5; display:flex; flex-wrap:wrap;
+    align-items:center; gap:.5rem; padding:.6rem 0; margin-bottom:1rem;
+    background:#0d1117; border-bottom:1px solid #21262d; }}
+  .filterbar label {{ color:#adbac7; font-size:.9rem; }}
+  .filterbar select {{ background:#161b22; color:#e6edf3; border:1px solid #30363d;
+    border-radius:6px; padding:.3rem .5rem; font-size:.9rem; }}
+  button.linkish {{ background:none; border:none; color:#58a6ff; padding:0;
+    font:inherit; cursor:pointer; text-align:left; }}
+  button.linkish:hover {{ text-decoration:underline; }}
+
   .trade {{ border:1px solid #30363d; border-radius:10px; padding:1rem 1.1rem; margin:0 0 1rem;
     background:#0f141a; }}
   .trade > .thead {{ display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; margin-bottom:.75rem; }}
@@ -2191,7 +2222,11 @@ def _html_trade_card(review, rank=None, detailed=False, anchor=False):
         takeaway = f'<p class="takeaway">{_h(text)}</p>'
 
     attr = f' id="t{review["trade_no"]}"' if anchor else ""
-    return f'<article class="trade"{attr}>{thead}{sides}{takeaway}</article>'
+    managers = html.escape(json.dumps(review.get("managers", [])), quote=True)
+    return (
+        f'<article class="trade"{attr} data-managers="{managers}">'
+        f'{thead}{sides}{takeaway}</article>'
+    )
 
 
 def _html_manager_section(overview, manager_names):
@@ -2215,8 +2250,13 @@ def _html_manager_section(overview, manager_names):
     ordered = sorted(overview.items(), key=lambda kv: kv[1]["net"], reverse=True)
     for i, (owner_id, e) in enumerate(ordered, start=1):
         record = f'{e["wins"]}-{e["losses"]}-{e["ties"]}'
+        mgr = name_of(owner_id)
+        name_cell = (
+            f'<button type="button" class="linkish" '
+            f'data-mgr-jump="{html.escape(mgr, quote=True)}">{_h(mgr)}</button>'
+        )
         rows += (
-            f"<tr><td class='num'>{i}</td><td>{_h(name_of(owner_id))}</td>"
+            f"<tr><td class='num'>{i}</td><td>{name_cell}</td>"
             f"<td class='num'>{e['trades']}</td><td class='num'>{record}</td>"
             f"<td class='num'>{e['received']:.1f}</td>"
             f"<td class='num'>{e['net']:+.1f}</td></tr>"
@@ -2264,13 +2304,28 @@ def render_html_report(
         'held the asset</p></header>'
     )
 
+    # Manager filter bar (client-side). Options are every manager who appears
+    # in a trade, by stable identity.
+    all_managers = sorted({m for r in reviews for m in r.get("managers", [])})
+    options = '<option value="__all__">All managers</option>' + "".join(
+        f'<option value="{html.escape(m, quote=True)}">{_h(m)}</option>'
+        for m in all_managers
+    )
+    filterbar = (
+        '<div class="filterbar">'
+        '<label for="mgr-filter">Filter by manager:</label> '
+        f'<select id="mgr-filter">{options}</select> '
+        '<span id="filter-count" class="muted" aria-live="polite"></span>'
+        '</div>'
+    )
+
     ranked = sorted(reviews, key=lambda r: r["margin"], reverse=True)
     highlights = "".join(
         _html_trade_card(r, rank=i, detailed=True)
         for i, r in enumerate(ranked[:top], start=1)
     )
     highlights_section = (
-        '<section aria-labelledby="hi-h">'
+        '<section class="filterable" aria-labelledby="hi-h">'
         f'<h2 id="hi-h">Top {min(top, len(ranked))} Highlights</h2>'
         f'{highlights}</section>'
     )
@@ -2279,16 +2334,63 @@ def render_html_report(
         _html_trade_card(r, detailed=False, anchor=True) for r in reviews
     )
     all_section = (
-        '<section aria-labelledby="all-h"><h2 id="all-h">All Trades</h2>'
+        '<section class="filterable" aria-labelledby="all-h">'
+        '<h2 id="all-h">All Trades</h2>'
         f'{all_cards}</section>'
     )
 
     manager_section = _html_manager_section(overview, manager_names)
 
     return _html_shell(
-        title, header + highlights_section + all_section + manager_section,
+        title,
+        header + filterbar + highlights_section + all_section
+        + manager_section + _FILTER_SCRIPT,
         generated,
     )
+
+
+# Client-side manager filter: show/hide trade cards, hide emptied sections,
+# update a live count, and let leaderboard names jump-filter. No dependencies.
+_FILTER_SCRIPT = """
+<script>
+(function () {
+  var sel = document.getElementById('mgr-filter');
+  if (!sel) return;
+  var count = document.getElementById('filter-count');
+  var cards = Array.prototype.slice.call(document.querySelectorAll('.trade'));
+  var sections = Array.prototype.slice.call(
+    document.querySelectorAll('section.filterable'));
+
+  function apply() {
+    var v = sel.value, shown = 0;
+    cards.forEach(function (c) {
+      var mgrs = [];
+      try { mgrs = JSON.parse(c.dataset.managers || '[]'); } catch (e) {}
+      var match = (v === '__all__') || mgrs.indexOf(v) > -1;
+      c.style.display = match ? '' : 'none';
+      if (match) shown++;
+    });
+    sections.forEach(function (s) {
+      var visible = Array.prototype.some.call(
+        s.querySelectorAll('.trade'),
+        function (c) { return c.style.display !== 'none'; });
+      s.style.display = visible ? '' : 'none';
+    });
+    count.textContent = (v === '__all__')
+      ? '' : (shown + ' trade' + (shown === 1 ? '' : 's'));
+  }
+
+  sel.addEventListener('change', apply);
+  document.querySelectorAll('[data-mgr-jump]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      sel.value = btn.getAttribute('data-mgr-jump');
+      apply();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  });
+})();
+</script>
+"""
 
 
 # =============================================================================
@@ -2450,6 +2552,7 @@ def main():
 
     reviews = [build_par_review(trade, ctx) for trade in trades]
     attach_lineage(reviews, trades)
+    annotate_review_managers(reviews, directory)
     overview = compute_manager_overview(
         reviews, directory["owner_by_season_roster"]
     )

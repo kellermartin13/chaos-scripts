@@ -1434,7 +1434,7 @@ class TestRenderHtmlReport:
             {
                 "trade_no": 1, "season": "2020", "week": 1,
                 "seasons_elapsed": 5, "winner_roster": 1, "margin": 450.0,
-                "lopsided": "heist",
+                "lopsided": "heist", "managers": ["Loser", "Winner <A>"],
                 "sides": {
                     1: self._side("Winner <A>", 500.0, [
                         self._asset("Diggs & Co", 500.0,
@@ -1446,7 +1446,7 @@ class TestRenderHtmlReport:
             {
                 "trade_no": 2, "season": "2022", "week": 1,
                 "seasons_elapsed": 3, "winner_roster": 1, "margin": 60.0,
-                "lopsided": None,
+                "lopsided": None, "managers": ["Other", "Winner <A>"],
                 "sides": {
                     1: self._side("Winner <A>", 80.0, [self._asset("Chase", 80.0)]),
                     2: self._side("Other", 20.0, [self._asset("X", 20.0)]),
@@ -1504,3 +1504,67 @@ class TestRenderHtmlReport:
         out = tr.render_html_report([], overview, names, generated="t")
 
         assert "No completed trades found." in out
+
+
+# ---------------------------------------------------------------------------
+# Manager filter (HTML) + annotate_review_managers
+# ---------------------------------------------------------------------------
+
+class TestManagerFilter(TestRenderHtmlReport):
+    """Reuses TestRenderHtmlReport fixtures (reviews carry 'managers')."""
+
+    def test_filter_select_present(self, reviews, overview, names):
+        assert '<select id="mgr-filter">' in self._render(reviews, overview, names)
+
+    def test_filter_option_is_escaped(self, reviews, overview, names):
+        out = self._render(reviews, overview, names)
+
+        assert '<option value="Winner &lt;A&gt;">Winner &lt;A&gt;</option>' in out
+
+    def test_card_carries_data_managers(self, reviews, overview, names):
+        out = self._render(reviews, overview, names)
+
+        # JSON list, HTML-attribute-escaped (quotes -> &quot;).
+        assert "data-managers=" in out and "&quot;Winner &lt;A&gt;&quot;" in out
+
+    def test_leaderboard_names_are_jump_buttons(self, reviews, overview, names):
+        out = self._render(reviews, overview, names)
+
+        assert 'data-mgr-jump="Winner &lt;A&gt;"' in out
+
+    def test_includes_filter_script(self, reviews, overview, names):
+        out = self._render(reviews, overview, names)
+
+        assert "<script>" in out and "getElementById('mgr-filter')" in out
+
+
+class TestAnnotateReviewManagers:
+
+    @pytest.fixture
+    def directory(self):
+        return {
+            "owner_by_season_roster": {
+                ("2025", 1): "o1", ("2025", 2): "o2",
+            },
+            "names": {"o1": "Alpha", "o2": "Beta"},
+        }
+
+    def test_resolves_stable_manager_names(self, directory):
+        reviews = [{
+            "season": "2025",
+            "sides": {1: {"label": "Team A 2025"}, 2: {"label": "Team B"}},
+        }]
+
+        tr.annotate_review_managers(reviews, directory)
+
+        assert reviews[0]["managers"] == ["Alpha", "Beta"]
+
+    def test_falls_back_to_label_when_owner_unknown(self, directory):
+        reviews = [{
+            "season": "2025",
+            "sides": {3: {"label": "Orphan Team"}},
+        }]
+
+        tr.annotate_review_managers(reviews, directory)
+
+        assert reviews[0]["managers"] == ["Orphan Team"]
