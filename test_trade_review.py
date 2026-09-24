@@ -645,6 +645,7 @@ class TestManagerOverview:
         assert rankings == {
             "best": None, "worst": None,
             "most_active": None, "most_passive": None, "fairest": None,
+            "most_titles": None,
         }
 
     def test_non_trader_seeded_and_most_passive(self):
@@ -2045,3 +2046,122 @@ class TestPendingRender:
         out = tr._html_trade_card(self._review(), detailed=False)
 
         assert '<span class="badge pending">PENDING</span>' in out
+
+
+# ---------------------------------------------------------------------------
+# Championships: detection, title-contribution flag, manager titles
+# ---------------------------------------------------------------------------
+
+class TestChampions:
+
+    def test_champion_from_championship_match(self):
+        bracket = [
+            {"r": 1, "m": 1, "t1": 1, "t2": 4, "w": 1, "l": 4},
+            {"r": 2, "m": 2, "t1": 1, "t2": 2, "w": 2, "l": 1, "p": 1},
+            {"r": 2, "m": 3, "t1": 4, "t2": 3, "w": 3, "l": 4, "p": 3},
+        ]
+
+        assert tr._champion_roster(bracket) == 2   # p==1 winner
+
+    def test_champion_falls_back_to_highest_round(self):
+        bracket = [
+            {"r": 1, "m": 1, "t1": 1, "t2": 4, "w": 1},
+            {"r": 2, "m": 2, "t1": 1, "t2": 2, "w": 2},
+        ]
+
+        assert tr._champion_roster(bracket) == 2
+
+    def test_no_winner_yet_returns_none(self):
+        assert tr._champion_roster([{"r": 1, "t1": 1, "t2": 2}]) is None
+
+    def test_build_champions_maps_to_owner(self):
+        chain = [{"league_id": "L2025", "season": "2025"}]
+        directory = {"owner_by_season_roster": {("2025", 2): "champ_owner"}}
+        brackets = {"L2025": [{"r": 1, "w": 2, "p": 1}]}
+
+        champions = tr.build_champions(
+            chain, directory, fetch=lambda lid: brackets[lid]
+        )
+
+        assert champions == {"2025": "champ_owner"}
+
+
+class TestTitleContributions:
+
+    def _reviews(self):
+        # Trade in 2025; roster 1's assets produced 8 PAR/g over 6 games in the
+        # 2025 title season. roster 2 got little.
+        return [{
+            "season": "2025", "week": 10, "winner_roster": 1,
+            "sides": {
+                1: {"label": "Champ", "by_season": {"2025": 48.0},
+                    "games_by_season": {"2025": 6}},
+                2: {"label": "Other", "by_season": {"2025": 4.0},
+                    "games_by_season": {"2025": 6}},
+            },
+        }]
+
+    def test_flags_contribution_for_champion(self):
+        reviews = self._reviews()
+        champions = {"2025": "champ_owner"}
+        owner_map = {("2025", 1): "champ_owner", ("2025", 2): "other_owner"}
+
+        tr.flag_title_contributions(reviews, champions, owner_map)
+
+        assert reviews[0]["contributed_title"] is True
+        assert reviews[0]["title_contributions"][0]["season"] == "2025"
+
+    def test_non_champion_side_not_credited(self):
+        reviews = self._reviews()
+        champions = {"2025": "other_owner"}   # roster 2 owner won; but 2 had 4 PAR
+        owner_map = {("2025", 1): "champ_owner", ("2025", 2): "other_owner"}
+
+        tr.flag_title_contributions(reviews, champions, owner_map)
+
+        # roster 2 (champion) produced only 4/6 = 0.67 PAR/g -> below threshold
+        assert reviews[0]["contributed_title"] is False
+
+    def test_below_min_games_not_credited(self):
+        reviews = [{
+            "season": "2025", "week": 16, "winner_roster": 1,
+            "sides": {1: {"label": "Champ", "by_season": {"2025": 30.0},
+                          "games_by_season": {"2025": 1}}},
+        }]
+        tr.flag_title_contributions(
+            reviews, {"2025": "o"}, {("2025", 1): "o"}
+        )
+
+        assert reviews[0]["contributed_title"] is False
+
+    def test_later_title_credited_to_earlier_trade(self):
+        # 2023 trade whose asset carried the manager to a 2025 title.
+        reviews = [{
+            "season": "2023", "week": 1, "winner_roster": 1,
+            "sides": {1: {"label": "Champ",
+                          "by_season": {"2023": 40.0, "2025": 60.0},
+                          "games_by_season": {"2023": 15, "2025": 15}}},
+        }]
+        tr.flag_title_contributions(
+            reviews, {"2025": "o"}, {("2023", 1): "o"}
+        )
+
+        assert reviews[0]["title_contributions"][0]["season"] == "2025"
+
+
+class TestManagerTitles:
+
+    def test_titles_counted_and_ranked(self):
+        reviews = []
+        owner_map = {("2024", 1): "A", ("2025", 1): "A", ("2025", 2): "B"}
+        champions = {"2024": "A", "2025": "A"}
+
+        overview = tr.compute_manager_overview(reviews, owner_map, champions)
+
+        assert overview["A"]["titles"] == 2
+        assert tr.manager_rankings(overview)["most_titles"] == "A"
+
+    def test_no_titles_when_no_champions(self):
+        overview = tr.compute_manager_overview([], {("2025", 1): "A"})
+
+        assert overview["A"]["titles"] == 0
+        assert tr.manager_rankings(overview)["most_titles"] is None
