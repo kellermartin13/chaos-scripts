@@ -2654,6 +2654,7 @@ def _html_shell(title, body_html, generated=None):
   ul.assets li:first-child {{ border-top:none; }}
   .lineage {{ display:block; color:#8b949e; font-size:.82rem; margin:.1rem 0 .1rem 1rem; }}
   .takeaway {{ margin:.6rem 0 0; font-style:italic; color:#adbac7; }}
+  .champ {{ margin:.35rem 0 0; color:#e3b341; font-size:.86rem; }}
 
   table {{ border-collapse:collapse; width:100%; margin-top:.5rem; font-size:.9rem; }}
   caption {{ text-align:left; color:#8b949e; font-size:.82rem; margin-bottom:.4rem; }}
@@ -2815,11 +2816,21 @@ def _html_trade_card(review, rank=None, detailed=False, anchor=False):
         text = _par_takeaway(review, winner).lstrip("→ ").strip()
         takeaway = f'<p class="takeaway">{_h(text)}</p>'
 
+    champ = ""
+    if detailed:
+        for c in review.get("title_contributions") or []:
+            champ += (
+                f'<p class="champ">\U0001f3c6 contributed to '
+                f'<strong>{_h(c["team"])}</strong>\u2019s {_h(c["season"])} '
+                f'title ({c["par_pg"]:.1f} PAR/G over {c["games"]} games in '
+                f'{_h(c["season"])})</p>'
+            )
+
     attr = f' id="t{review["trade_no"]}"' if anchor else ""
     managers = html.escape(json.dumps(review.get("managers", [])), quote=True)
     return (
         f'<article class="trade"{attr} data-managers="{managers}">'
-        f'{thead}{sides}{takeaway}</article>'
+        f'{thead}{sides}{takeaway}{champ}</article>'
     )
 
 
