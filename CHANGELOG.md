@@ -45,7 +45,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   acquisition is judged on the run it actually led to, not the whole season or
   games before the trade. A trade can be credited to a later title, and to more
   than one. Evidence-based, not causal (min games + PAR/game threshold guard
-  against benched/fluke pickups claiming a ring).
+  against benched/fluke pickups claiming a ring). A **Championship Trades**
+  section then explains each title: per championship, the contributing trades
+  with their title-season PAR/game, games, and the key acquisitions (with their
+  title-season PAR) behind them — so every 🏆 tag has a stated "why."
 - **Trade review — `PENDING` tag for unfinalized trades.** A trade whose return
   still includes an unresolved (undrafted) pick is tagged `PENDING` and held
   out of the LOPSIDED/HEIST/EVEN verdict — its realized PAR understates what's

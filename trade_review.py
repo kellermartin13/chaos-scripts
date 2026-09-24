@@ -435,17 +435,63 @@ def flag_title_contributions(
                     continue
                 par_pg = side["by_season"].get(season, 0.0) / games
                 if par_pg >= parpg_threshold:
+                    driving = sorted(
+                        (
+                            {"name": a["name"],
+                             "par": round(a["by_season"].get(season, 0.0), 1)}
+                            for a in side.get("assets", [])
+                            if a.get("by_season", {}).get(season, 0.0) > 0
+                        ),
+                        key=lambda a: a["par"], reverse=True,
+                    )
                     contributions.append(
                         {
                             "season": season,
                             "team": side["label"],
                             "par_pg": round(par_pg, 1),
                             "games": games,
+                            "par": round(side["by_season"].get(season, 0.0), 1),
+                            "assets": driving,
                         }
                     )
         contributions.sort(key=lambda c: c["season"])
         review["title_contributions"] = contributions
         review["contributed_title"] = bool(contributions)
+
+
+def build_championship_summary(reviews, champions_by_season, manager_names):
+    """
+    Group title-contributing trades by championship for the explanatory section:
+
+        [{season, champion, trades: [{trade_no, team, par_pg, games, par,
+          assets:[{name, par}]}]}]
+
+    Trades within a title are ordered by title-season PAR (biggest driver
+    first). Seasons with a champion but no qualifying trade still appear (with
+    an empty trades list) so a title isn't silently dropped.
+    """
+
+    by_season = defaultdict(list)
+    for review in reviews:
+        for contribution in review.get("title_contributions") or []:
+            by_season[contribution["season"]].append(
+                {"trade_no": review["trade_no"], **contribution}
+            )
+
+    summary = []
+    for season in sorted(champions_by_season):
+        owner_id = champions_by_season[season]
+        summary.append(
+            {
+                "season": season,
+                "champion": manager_names.get(owner_id) or f"Manager {owner_id}",
+                "trades": sorted(
+                    by_season.get(season, []),
+                    key=lambda t: t["par"], reverse=True,
+                ),
+            }
+        )
+    return summary
 
 
 # =============================================================================
@@ -2457,7 +2503,8 @@ def render_par_index_entry(review):
     return "\n".join(lines)
 
 
-def print_par_report(reviews, league_name=None, top=12, floored=True):
+def print_par_report(reviews, league_name=None, top=12, floored=True,
+                     championships=None):
     """
     Print the default PAR report: a header, the most lopsided trades rendered
     with full context (per-asset PAR, hold windows, per-season trajectory,
@@ -2496,6 +2543,41 @@ def print_par_report(reviews, league_name=None, top=12, floored=True):
     for review in reviews:
         print(render_par_index_entry(review))
         print()
+
+    print_championship_section(championships)
+
+
+def print_championship_section(summary):
+    """
+    Explain each 🏆 TITLE tag: per championship, the trades that fueled it and
+    the acquisitions (with title-season PAR) behind them.
+    """
+
+    if not summary:
+        return
+
+    print("\n" + "=" * 78)
+    print("\U0001f3c6 CHAMPIONSHIP TRADES — how each title was built")
+    print("=" * 78)
+    print(
+        "Trades whose acquisitions produced for the champion in the title "
+        "season (PAR/game over the post-trade stretch)."
+    )
+
+    for title in summary:
+        print(f"\n\U0001f3c6 {title['season']} — {title['champion']}")
+        if not title["trades"]:
+            print("  (no single trade cleared the contribution bar)")
+            continue
+        for t in title["trades"]:
+            assets = ", ".join(
+                f"{a['name']} ({a['par']:.0f})" for a in t["assets"][:4]
+            ) or "—"
+            print(
+                f"  [T{t['trade_no']}] {t['par_pg']:.1f} PAR/G over "
+                f"{t['games']}g ({t['par']:.0f} PAR): {assets}"
+            )
+    print()
 
 
 def _report_title(league_name, season=None):
@@ -2810,9 +2892,58 @@ def _html_manager_section(overview, manager_names):
     )
 
 
+def _html_championship_section(summary):
+    """Explain each 🏆 TITLE tag: per championship, the trades that fueled it
+    and the acquisitions (with title-season PAR) behind them."""
+
+    if not summary:
+        return ""
+
+    parts = [
+        '<section aria-labelledby="champ-h">'
+        '<h2 id="champ-h">\U0001f3c6 Championship Trades</h2>'
+        '<p class="meta">How each title was built — trades whose acquisitions '
+        'produced for the champion in the title season (PAR/game over the '
+        'post-trade stretch). Evidence, not causation.</p>'
+    ]
+
+    for title in summary:
+        parts.append(
+            f'<h3>{_h(title["season"])} — {_h(title["champion"])}</h3>'
+        )
+        if not title["trades"]:
+            parts.append(
+                '<p class="muted">No single trade cleared the contribution '
+                'bar.</p>'
+            )
+            continue
+        rows = ""
+        for t in title["trades"]:
+            assets = ", ".join(
+                f"{_h(a['name'])} ({a['par']:.0f})" for a in t["assets"][:4]
+            ) or "—"
+            rows += (
+                f'<tr><td><a href="#t{t["trade_no"]}">T{t["trade_no"]}</a></td>'
+                f"<td class='num'>{t['par_pg']:.1f}</td>"
+                f"<td class='num'>{t['games']}</td>"
+                f"<td class='num'>{t['par']:.0f}</td><td>{assets}</td></tr>"
+            )
+        parts.append(
+            '<table><thead><tr><th scope="col">Trade</th>'
+            '<th scope="col" class="num">PAR/G</th>'
+            '<th scope="col" class="num">Games</th>'
+            '<th scope="col" class="num">PAR</th>'
+            '<th scope="col">Key acquisitions (title-season PAR)</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table>'
+        )
+
+    parts.append("</section>")
+    return "".join(parts)
+
+
 def render_html_report(
     reviews, overview, manager_names, league_name=None, season=None,
-    top=12, floored=True, generated=None,
+    top=12, floored=True, generated=None, championships=None,
 ):
     """
     Build the rich, styled HTML report (highlight cards, per-season
@@ -2875,11 +3006,12 @@ def render_html_report(
     )
 
     manager_section = _html_manager_section(overview, manager_names)
+    championship_section = _html_championship_section(championships)
 
     return _html_shell(
         title,
         header + filterbar + highlights_section + all_section
-        + manager_section + _FILTER_SCRIPT,
+        + championship_section + manager_section + _FILTER_SCRIPT,
         generated,
     )
 
@@ -3117,6 +3249,9 @@ def main():
     flag_title_contributions(
         reviews, champions, directory["owner_by_season_roster"]
     )
+    championship_summary = build_championship_summary(
+        reviews, champions, directory["names"]
+    )
 
     overview = compute_manager_overview(
         reviews, directory["owner_by_season_roster"], champions
@@ -3127,11 +3262,12 @@ def main():
             reviews, overview, directory["names"],
             league_name=league_name, season=args.season,
             top=args.top, floored=ctx["floor"],
+            championships=championship_summary,
         ))
     else:
         print_par_report(
             reviews, league_name=league_name, top=args.top,
-            floored=ctx["floor"],
+            floored=ctx["floor"], championships=championship_summary,
         )
         print_manager_overview(overview, directory["names"], unit="PAR")
 
