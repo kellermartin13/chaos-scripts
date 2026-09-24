@@ -463,19 +463,25 @@ def build_championship_summary(reviews, champions_by_season, manager_names):
     """
     Group title-contributing trades by championship for the explanatory section:
 
-        [{season, champion, trades: [{trade_no, team, par_pg, games, par,
+        [{season, champion, trades: [{trade_no, made, team, par_pg, games, par,
           assets:[{name, par}]}]}]
 
-    Trades within a title are ordered by title-season PAR (biggest driver
-    first). Seasons with a champion but no qualifying trade still appear (with
-    an empty trades list) so a title isn't silently dropped.
+    `made` is when the trade itself happened (may be seasons before the title
+    it fed). par_pg / games / par count ONLY the champion's title season, from
+    the trade forward. Trades within a title are ordered by title-season PAR
+    (biggest driver first). Seasons with a champion but no qualifying trade
+    still appear (empty trades list) so a title isn't silently dropped.
     """
 
     by_season = defaultdict(list)
     for review in reviews:
         for contribution in review.get("title_contributions") or []:
             by_season[contribution["season"]].append(
-                {"trade_no": review["trade_no"], **contribution}
+                {
+                    "trade_no": review["trade_no"],
+                    "made": format_trade_when(review),
+                    **contribution,
+                }
             )
 
     summary = []
@@ -1637,7 +1643,7 @@ def build_all_reviews(
 # Manager overview
 # =============================================================================
 
-def compute_manager_overview(reviews, owner_by_season_roster, champions_by_season=None):
+def compute_manager_overview(reviews, owner_by_season_roster):
     """
     Aggregate trade outcomes by manager (stable owner_id) across every trade.
 
@@ -1665,7 +1671,6 @@ def compute_manager_overview(reviews, owner_by_season_roster, champions_by_seaso
             "losses": 0,
             "ties": 0,
             "even": 0,
-            "titles": 0,
             "received": 0.0,
             "net": 0.0,
         }
@@ -1687,7 +1692,6 @@ def compute_manager_overview(reviews, owner_by_season_roster, champions_by_seaso
                     "losses": 0,
                     "ties": 0,
                     "even": 0,
-                    "titles": 0,
                     "received": 0.0,
                     "net": 0.0,
                 },
@@ -1708,14 +1712,6 @@ def compute_manager_overview(reviews, owner_by_season_roster, champions_by_seaso
                 entry["wins"] += 1
             else:
                 entry["losses"] += 1
-
-    for season, owner_id in (champions_by_season or {}).items():
-        entry = stats.setdefault(
-            owner_id,
-            {"trades": 0, "wins": 0, "losses": 0, "ties": 0, "even": 0,
-             "titles": 0, "received": 0.0, "net": 0.0},
-        )
-        entry["titles"] += 1
 
     for entry in stats.values():
         entry["received"] = round(entry["received"], 2)
@@ -1738,7 +1734,6 @@ def manager_rankings(overview):
             "most_active": None,
             "most_passive": None,
             "fairest": None,
-            "most_titles": None,
         }
 
     items = list(overview.items())
@@ -1747,17 +1742,12 @@ def manager_rankings(overview):
     fairest_owner, fairest_entry = max(items, key=lambda kv: kv[1].get("even", 0))
     fairest = fairest_owner if fairest_entry.get("even", 0) > 0 else None
 
-    # Most titles; None if nobody has a championship recorded.
-    champ_owner, champ_entry = max(items, key=lambda kv: kv[1].get("titles", 0))
-    most_titles = champ_owner if champ_entry.get("titles", 0) > 0 else None
-
     return {
         "best": max(items, key=lambda kv: kv[1]["net"])[0],
         "worst": min(items, key=lambda kv: kv[1]["net"])[0],
         "most_active": max(items, key=lambda kv: kv[1]["trades"])[0],
         "most_passive": min(items, key=lambda kv: kv[1]["trades"])[0],
         "fairest": fairest,
-        "most_titles": most_titles,
     }
 
 
@@ -1915,20 +1905,14 @@ def print_manager_overview(overview, manager_names, unit="pts"):
             f"  Fairest dealer:  {name_of(fair)} "
             f"({overview[fair]['even']} even/fair trades)"
         )
-    if rankings.get("most_titles") is not None:
-        champ = rankings["most_titles"]
-        print(
-            f"  Most titles:     {name_of(champ)} "
-            f"({overview[champ]['titles']} \U0001f3c6)"
-        )
 
     print()
     print(f"  RANKING by net {unit}:")
     print(
         f"  {'#':<4}{'Manager':<32}{'Trades':>7}{'W-L-T':>9}"
-        f"{'Even':>6}{'Titles':>7}{'Received':>11}{'Net':>9}"
+        f"{'Even':>6}{'Received':>11}{'Net':>9}"
     )
-    print("  " + "-" * 85)
+    print("  " + "-" * 78)
 
     ordered = sorted(
         overview.items(),
@@ -1945,8 +1929,8 @@ def print_manager_overview(overview, manager_names, unit="pts"):
 
         print(
             f"  {rank:<4}{label:<32}{entry['trades']:>7}{record:>9}"
-            f"{entry.get('even', 0):>6}{entry.get('titles', 0):>7}"
-            f"{entry['received']:>11.1f}{entry['net']:>+9.1f}"
+            f"{entry.get('even', 0):>6}{entry['received']:>11.1f}"
+            f"{entry['net']:>+9.1f}"
         )
 
     print()
@@ -2566,8 +2550,9 @@ def print_championship_section(summary):
     print("\U0001f3c6 CHAMPIONSHIP TRADES — how each title was built")
     print("=" * 78)
     print(
-        "Trades whose acquisitions produced for the champion in the title "
-        "season (PAR/game over the post-trade stretch)."
+        "PAR/G, games, and PAR below count ONLY the champion's title-season "
+        "games (from the trade forward) — not the trade's overall production. "
+        "'made' is when the trade itself happened."
     )
 
     for title in summary:
@@ -2580,8 +2565,9 @@ def print_championship_section(summary):
                 f"{a['name']} ({a['par']:.0f})" for a in t["assets"][:4]
             ) or "—"
             print(
-                f"  [T{t['trade_no']}] {t['par_pg']:.1f} PAR/G over "
-                f"{t['games']}g ({t['par']:.0f} PAR): {assets}"
+                f"  [T{t['trade_no']}] made {t['made']} — "
+                f"{t['par_pg']:.1f} PAR/G over {t['games']} games in "
+                f"{title['season']} ({t['par']:.0f} PAR): {assets}"
             )
     print()
 
@@ -2857,11 +2843,6 @@ def _html_manager_section(overview, manager_names):
             f'({overview[ranks["fairest"]]["even"]} even)'
             if ranks.get("fairest") is not None else ""
         )
-        + (
-            f' · Most titles: <strong>{_h(name_of(ranks["most_titles"]))}</strong> '
-            f'({overview[ranks["most_titles"]]["titles"]} \U0001f3c6)'
-            if ranks.get("most_titles") is not None else ""
-        )
         + '</p>'
     )
 
@@ -2878,7 +2859,6 @@ def _html_manager_section(overview, manager_names):
             f"<tr><td class='num'>{i}</td><td>{name_cell}</td>"
             f"<td class='num'>{e['trades']}</td><td class='num'>{record}</td>"
             f"<td class='num'>{e.get('even', 0)}</td>"
-            f"<td class='num'>{e.get('titles', 0)}</td>"
             f"<td class='num'>{e['received']:.1f}</td>"
             f"<td class='num'>{e['net']:+.1f}</td></tr>"
         )
@@ -2888,7 +2868,6 @@ def _html_manager_section(overview, manager_names):
         '<th scope="col" class="num">#</th><th scope="col">Manager</th>'
         '<th scope="col" class="num">Trades</th><th scope="col" class="num">W-L-T</th>'
         '<th scope="col" class="num">Even</th>'
-        '<th scope="col" class="num">\U0001f3c6</th>'
         '<th scope="col" class="num">Received</th><th scope="col" class="num">Net PAR</th>'
         f'</tr></thead><tbody>{rows}</tbody></table>'
     )
@@ -2908,9 +2887,11 @@ def _html_championship_section(summary):
     parts = [
         '<section aria-labelledby="champ-h">'
         '<h2 id="champ-h">\U0001f3c6 Championship Trades</h2>'
-        '<p class="meta">How each title was built — trades whose acquisitions '
-        'produced for the champion in the title season (PAR/game over the '
-        'post-trade stretch). Evidence, not causation.</p>'
+        '<p class="meta">How each title was built. <strong>PAR/G, Games, and '
+        'PAR count only the champion\u2019s title-season games</strong> (from '
+        'the trade forward) — not the trade\u2019s overall production. '
+        '\u201cMade\u201d is when the trade itself happened (it may predate the '
+        'title it fed). Evidence, not causation.</p>'
     ]
 
     for title in summary:
@@ -2930,15 +2911,18 @@ def _html_championship_section(summary):
             ) or "—"
             rows += (
                 f'<tr><td><a href="#t{t["trade_no"]}">T{t["trade_no"]}</a></td>'
+                f'<td>{_h(t["made"])}</td>'
                 f"<td class='num'>{t['par_pg']:.1f}</td>"
                 f"<td class='num'>{t['games']}</td>"
                 f"<td class='num'>{t['par']:.0f}</td><td>{assets}</td></tr>"
             )
         parts.append(
-            '<table><thead><tr><th scope="col">Trade</th>'
-            '<th scope="col" class="num">PAR/G</th>'
-            '<th scope="col" class="num">Games</th>'
-            '<th scope="col" class="num">PAR</th>'
+            f'<table><caption>All rates/totals are for the {_h(title["season"])} '
+            'season only</caption><thead><tr><th scope="col">Trade</th>'
+            '<th scope="col">Made</th>'
+            f'<th scope="col" class="num">PAR/G ({_h(title["season"])})</th>'
+            f'<th scope="col" class="num">Games ({_h(title["season"])})</th>'
+            f'<th scope="col" class="num">PAR ({_h(title["season"])})</th>'
             '<th scope="col">Key acquisitions (title-season PAR)</th>'
             f'</tr></thead><tbody>{rows}</tbody></table>'
         )
@@ -3260,7 +3244,7 @@ def main():
     )
 
     overview = compute_manager_overview(
-        reviews, directory["owner_by_season_roster"], champions
+        reviews, directory["owner_by_season_roster"]
     )
 
     if args.html:
