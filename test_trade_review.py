@@ -645,7 +645,6 @@ class TestManagerOverview:
         assert rankings == {
             "best": None, "worst": None,
             "most_active": None, "most_passive": None, "fairest": None,
-            "most_titles": None,
         }
 
     def test_non_trader_seeded_and_most_passive(self):
@@ -2146,25 +2145,6 @@ class TestTitleContributions:
         )
 
         assert reviews[0]["title_contributions"][0]["season"] == "2025"
-
-
-class TestManagerTitles:
-
-    def test_titles_counted_and_ranked(self):
-        reviews = []
-        owner_map = {("2024", 1): "A", ("2025", 1): "A", ("2025", 2): "B"}
-        champions = {"2024": "A", "2025": "A"}
-
-        overview = tr.compute_manager_overview(reviews, owner_map, champions)
-
-        assert overview["A"]["titles"] == 2
-        assert tr.manager_rankings(overview)["most_titles"] == "A"
-
-    def test_no_titles_when_no_champions(self):
-        overview = tr.compute_manager_overview([], {("2025", 1): "A"})
-
-        assert overview["A"]["titles"] == 0
-        assert tr.manager_rankings(overview)["most_titles"] is None
 
 
 # ---------------------------------------------------------------------------

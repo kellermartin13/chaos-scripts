@@ -1643,7 +1643,7 @@ def build_all_reviews(
 # Manager overview
 # =============================================================================
 
-def compute_manager_overview(reviews, owner_by_season_roster, champions_by_season=None):
+def compute_manager_overview(reviews, owner_by_season_roster):
     """
     Aggregate trade outcomes by manager (stable owner_id) across every trade.
 
@@ -1671,7 +1671,6 @@ def compute_manager_overview(reviews, owner_by_season_roster, champions_by_seaso
             "losses": 0,
             "ties": 0,
             "even": 0,
-            "titles": 0,
             "received": 0.0,
             "net": 0.0,
         }
@@ -1693,7 +1692,6 @@ def compute_manager_overview(reviews, owner_by_season_roster, champions_by_seaso
                     "losses": 0,
                     "ties": 0,
                     "even": 0,
-                    "titles": 0,
                     "received": 0.0,
                     "net": 0.0,
                 },
@@ -1714,14 +1712,6 @@ def compute_manager_overview(reviews, owner_by_season_roster, champions_by_seaso
                 entry["wins"] += 1
             else:
                 entry["losses"] += 1
-
-    for season, owner_id in (champions_by_season or {}).items():
-        entry = stats.setdefault(
-            owner_id,
-            {"trades": 0, "wins": 0, "losses": 0, "ties": 0, "even": 0,
-             "titles": 0, "received": 0.0, "net": 0.0},
-        )
-        entry["titles"] += 1
 
     for entry in stats.values():
         entry["received"] = round(entry["received"], 2)
@@ -1744,7 +1734,6 @@ def manager_rankings(overview):
             "most_active": None,
             "most_passive": None,
             "fairest": None,
-            "most_titles": None,
         }
 
     items = list(overview.items())
@@ -1753,17 +1742,12 @@ def manager_rankings(overview):
     fairest_owner, fairest_entry = max(items, key=lambda kv: kv[1].get("even", 0))
     fairest = fairest_owner if fairest_entry.get("even", 0) > 0 else None
 
-    # Most titles; None if nobody has a championship recorded.
-    champ_owner, champ_entry = max(items, key=lambda kv: kv[1].get("titles", 0))
-    most_titles = champ_owner if champ_entry.get("titles", 0) > 0 else None
-
     return {
         "best": max(items, key=lambda kv: kv[1]["net"])[0],
         "worst": min(items, key=lambda kv: kv[1]["net"])[0],
         "most_active": max(items, key=lambda kv: kv[1]["trades"])[0],
         "most_passive": min(items, key=lambda kv: kv[1]["trades"])[0],
         "fairest": fairest,
-        "most_titles": most_titles,
     }
 
 
@@ -1921,20 +1905,14 @@ def print_manager_overview(overview, manager_names, unit="pts"):
             f"  Fairest dealer:  {name_of(fair)} "
             f"({overview[fair]['even']} even/fair trades)"
         )
-    if rankings.get("most_titles") is not None:
-        champ = rankings["most_titles"]
-        print(
-            f"  Most titles:     {name_of(champ)} "
-            f"({overview[champ]['titles']} \U0001f3c6)"
-        )
 
     print()
     print(f"  RANKING by net {unit}:")
     print(
         f"  {'#':<4}{'Manager':<32}{'Trades':>7}{'W-L-T':>9}"
-        f"{'Even':>6}{'Titles':>7}{'Received':>11}{'Net':>9}"
+        f"{'Even':>6}{'Received':>11}{'Net':>9}"
     )
-    print("  " + "-" * 85)
+    print("  " + "-" * 78)
 
     ordered = sorted(
         overview.items(),
@@ -1951,8 +1929,8 @@ def print_manager_overview(overview, manager_names, unit="pts"):
 
         print(
             f"  {rank:<4}{label:<32}{entry['trades']:>7}{record:>9}"
-            f"{entry.get('even', 0):>6}{entry.get('titles', 0):>7}"
-            f"{entry['received']:>11.1f}{entry['net']:>+9.1f}"
+            f"{entry.get('even', 0):>6}{entry['received']:>11.1f}"
+            f"{entry['net']:>+9.1f}"
         )
 
     print()
@@ -2865,11 +2843,6 @@ def _html_manager_section(overview, manager_names):
             f'({overview[ranks["fairest"]]["even"]} even)'
             if ranks.get("fairest") is not None else ""
         )
-        + (
-            f' · Most titles: <strong>{_h(name_of(ranks["most_titles"]))}</strong> '
-            f'({overview[ranks["most_titles"]]["titles"]} \U0001f3c6)'
-            if ranks.get("most_titles") is not None else ""
-        )
         + '</p>'
     )
 
@@ -2886,7 +2859,6 @@ def _html_manager_section(overview, manager_names):
             f"<tr><td class='num'>{i}</td><td>{name_cell}</td>"
             f"<td class='num'>{e['trades']}</td><td class='num'>{record}</td>"
             f"<td class='num'>{e.get('even', 0)}</td>"
-            f"<td class='num'>{e.get('titles', 0)}</td>"
             f"<td class='num'>{e['received']:.1f}</td>"
             f"<td class='num'>{e['net']:+.1f}</td></tr>"
         )
@@ -2896,7 +2868,6 @@ def _html_manager_section(overview, manager_names):
         '<th scope="col" class="num">#</th><th scope="col">Manager</th>'
         '<th scope="col" class="num">Trades</th><th scope="col" class="num">W-L-T</th>'
         '<th scope="col" class="num">Even</th>'
-        '<th scope="col" class="num">\U0001f3c6</th>'
         '<th scope="col" class="num">Received</th><th scope="col" class="num">Net PAR</th>'
         f'</tr></thead><tbody>{rows}</tbody></table>'
     )
@@ -3273,7 +3244,7 @@ def main():
     )
 
     overview = compute_manager_overview(
-        reviews, directory["owner_by_season_roster"], champions
+        reviews, directory["owner_by_season_roster"]
     )
 
     if args.html:
