@@ -35,6 +35,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Trade review — `PENDING` tag for unfinalized trades.** A trade whose return
+  still includes an unresolved (undrafted) pick is tagged `PENDING` and held
+  out of the LOPSIDED/HEIST/EVEN verdict — its realized PAR understates what's
+  still coming, so it shouldn't be graded a heist (or a fair deal) until the
+  pick drafts. Shown in highlights, index, and HTML (purple badge) with a
+  "not final until it drafts" takeaway. PAR stays strictly realized; nothing is
+  projected (so converting a pick into a player never makes a trade grade
+  worse).
+- **Trade review — `EVEN` tag and fairest-dealer highlight.** A trade whose two
+  best sides delivered comparable PAR (within 25%) and both produced real value
+  (≥ 25 PAR) is tagged `EVEN` — a genuinely fair deal — in the highlights,
+  chronological index, and HTML (blue badge), with a "Fair deal" takeaway. The
+  manager overview now counts each manager's even trades, adds an **Even**
+  column, and names the **Fairest dealer** (most fair deals reached).
 - **Trade review — `--debug-player ID_OR_NAME`.** Prints an ownership
   diagnosis for one player to stderr (every trade that moved him, the timeline
   events, and the computed hold-window end per trade) for pinning double-counts
