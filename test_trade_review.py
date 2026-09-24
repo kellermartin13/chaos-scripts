@@ -2110,6 +2110,39 @@ class TestTitleContributions:
         assert reviews[0]["contributed_title"] is True
         assert reviews[0]["title_contributions"][0]["season"] == "2025"
 
+    def test_html_highlight_shows_contribution_line(self):
+        # The per-trade "contributed to ... title" explainer must render in the
+        # HTML highlight card, matching the text highlight (not just the badge).
+        review = {
+            "trade_no": 4, "season": "2022", "week": 5, "seasons_elapsed": 5,
+            "winner_roster": 1, "margin": 743.7, "lopsided": None,
+            "even": False, "contributed_title": True,
+            "title_contributions": [
+                {"season": "2024", "team": "Solenya", "par_pg": 7.3,
+                 "games": 17, "par": 124.0,
+                 "assets": [{"name": "Trevor Lawrence", "par": 124.0}]}],
+            "sides": {
+                1: {"label": "Solenya", "par": 847.8, "points": 1605,
+                    "par_pg": 9.0, "by_season": {"2024": 125.0}, "assets": [
+                        {"name": "Trevor Lawrence", "position": "QB",
+                         "par": 689.0, "par_pg": 11.9, "points": 1400,
+                         "hold": "still held · 5 seas", "became": None}]},
+                2: {"label": "lex", "par": 104.1, "points": 271, "par_pg": 4.0,
+                    "by_season": {}, "assets": [
+                        {"name": "Marcus Mariota", "position": "QB",
+                         "par": 96.7, "par_pg": 10.7, "points": 271,
+                         "hold": "held 1 seas", "became": None}]},
+            },
+        }
+        detailed = tr._html_trade_card(review, rank=1, detailed=True)
+        brief = tr._html_trade_card(review, detailed=False)
+
+        assert 'class="champ"' in detailed
+        assert "contributed to" in detailed
+        assert "Solenya" in detailed and "2024 title" in detailed
+        # Brief (all-trades) cards only carry the badge, like the text index.
+        assert "contributed to" not in brief
+
     def test_non_champion_side_not_credited(self):
         reviews = self._reviews()
         champions = {"2025": "other_owner"}   # roster 2 owner won; but 2 had 4 PAR
