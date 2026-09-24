@@ -126,6 +126,17 @@ def get_draft_picks(draft_id):
     return get_json(f"{SLEEPER_BASE}/draft/{draft_id}/picks")
 
 
+def get_winners_bracket(league_id):
+    """
+    Playoff winners bracket for a league/season. Each match has a round `r`,
+    the two entrants `t1`/`t2`, the winner `w`, loser `l`, and often a
+    placement `p` (p==1 is the championship game). Used to find the season's
+    champion roster.
+    """
+
+    return get_json(f"{SLEEPER_BASE}/league/{league_id}/winners_bracket")
+
+
 def get_players(use_cache=True, client=None):
     """
     Sleeper's NFL player map: sleeper player_id -> player metadata.
@@ -341,6 +352,100 @@ def build_manager_directory(
         "owner_by_season_roster": owner_by_season_roster,
         "names": names,
     }
+
+
+# A trade is credited toward a title when the acquired assets produced at least
+# CHAMPIONSHIP_PARPG_THRESHOLD PAR per game for the champion IN the title
+# season, over at least CHAMPIONSHIP_MIN_GAMES games. Because PAR is counted
+# from the trade week forward, this is the per-game rate over the post-trade
+# stretch that actually led to the title — so a week-10 acquisition is judged
+# on its run, not diluted by the full season or by games before the trade.
+CHAMPIONSHIP_PARPG_THRESHOLD = 3.0
+CHAMPIONSHIP_MIN_GAMES = 2
+
+
+def _champion_roster(bracket):
+    """Champion roster_id from a winners bracket: the winner of the p==1
+    (championship) match, or the winner of the highest round if unlabeled."""
+
+    matches = [m for m in (bracket or []) if m.get("w") is not None]
+    if not matches:
+        return None
+
+    final = next((m for m in matches if m.get("p") == 1), None)
+    if final is None:
+        final = max(matches, key=lambda m: m.get("r") or 0)
+    return final.get("w")
+
+
+def build_champions(chain, directory, fetch=get_winners_bracket):
+    """
+    {season: champion_owner_id} across the dynasty, from each season's winners
+    bracket mapped to the stable manager. Seasons whose bracket isn't final yet
+    (no winner) are omitted. fetch is injectable for testing.
+    """
+
+    owner_by = directory.get("owner_by_season_roster", {})
+    champions = {}
+
+    for league in chain:
+        season = str(league.get("season"))
+        try:
+            roster_id = _champion_roster(fetch(league["league_id"]))
+        except Exception:
+            roster_id = None  # bracket unavailable (e.g. season in progress)
+        if roster_id is None:
+            continue
+        owner_id = owner_by.get((season, roster_id))
+        if owner_id is not None:
+            champions[season] = owner_id
+
+    return champions
+
+
+def flag_title_contributions(
+    reviews, champions_by_season, owner_by_season_roster,
+    parpg_threshold=CHAMPIONSHIP_PARPG_THRESHOLD,
+    min_games=CHAMPIONSHIP_MIN_GAMES,
+):
+    """
+    Mark trades that contributed to a championship: the receiving manager won a
+    title in season S, and the assets they got produced at a strong PAR/game
+    rate for them *in season S* — measured over the games played from the trade
+    week forward (by_season / games_by_season already reflect the hold window,
+    so a week-10 acquisition is judged on its post-trade stretch, not the whole
+    season). Evidence-based, not causal — a trade can contribute to a later
+    title, and to more than one.
+
+    Sets review["title_contributions"] = [{season, team, par_pg, games}] and
+    review["contributed_title"] = bool.
+    """
+
+    for review in reviews:
+        contributions = []
+        for roster_id, side in review["sides"].items():
+            owner_id = owner_by_season_roster.get((review["season"], roster_id))
+            if owner_id is None:
+                continue
+            for season, champ_owner in champions_by_season.items():
+                if champ_owner != owner_id:
+                    continue
+                games = side.get("games_by_season", {}).get(season, 0)
+                if games < min_games:
+                    continue
+                par_pg = side["by_season"].get(season, 0.0) / games
+                if par_pg >= parpg_threshold:
+                    contributions.append(
+                        {
+                            "season": season,
+                            "team": side["label"],
+                            "par_pg": round(par_pg, 1),
+                            "games": games,
+                        }
+                    )
+        contributions.sort(key=lambda c: c["season"])
+        review["title_contributions"] = contributions
+        review["contributed_title"] = bool(contributions)
 
 
 # =============================================================================
@@ -1486,7 +1591,7 @@ def build_all_reviews(
 # Manager overview
 # =============================================================================
 
-def compute_manager_overview(reviews, owner_by_season_roster):
+def compute_manager_overview(reviews, owner_by_season_roster, champions_by_season=None):
     """
     Aggregate trade outcomes by manager (stable owner_id) across every trade.
 
@@ -1514,6 +1619,7 @@ def compute_manager_overview(reviews, owner_by_season_roster):
             "losses": 0,
             "ties": 0,
             "even": 0,
+            "titles": 0,
             "received": 0.0,
             "net": 0.0,
         }
@@ -1535,6 +1641,7 @@ def compute_manager_overview(reviews, owner_by_season_roster):
                     "losses": 0,
                     "ties": 0,
                     "even": 0,
+                    "titles": 0,
                     "received": 0.0,
                     "net": 0.0,
                 },
@@ -1555,6 +1662,14 @@ def compute_manager_overview(reviews, owner_by_season_roster):
                 entry["wins"] += 1
             else:
                 entry["losses"] += 1
+
+    for season, owner_id in (champions_by_season or {}).items():
+        entry = stats.setdefault(
+            owner_id,
+            {"trades": 0, "wins": 0, "losses": 0, "ties": 0, "even": 0,
+             "titles": 0, "received": 0.0, "net": 0.0},
+        )
+        entry["titles"] += 1
 
     for entry in stats.values():
         entry["received"] = round(entry["received"], 2)
@@ -1577,6 +1692,7 @@ def manager_rankings(overview):
             "most_active": None,
             "most_passive": None,
             "fairest": None,
+            "most_titles": None,
         }
 
     items = list(overview.items())
@@ -1585,12 +1701,17 @@ def manager_rankings(overview):
     fairest_owner, fairest_entry = max(items, key=lambda kv: kv[1].get("even", 0))
     fairest = fairest_owner if fairest_entry.get("even", 0) > 0 else None
 
+    # Most titles; None if nobody has a championship recorded.
+    champ_owner, champ_entry = max(items, key=lambda kv: kv[1].get("titles", 0))
+    most_titles = champ_owner if champ_entry.get("titles", 0) > 0 else None
+
     return {
         "best": max(items, key=lambda kv: kv[1]["net"])[0],
         "worst": min(items, key=lambda kv: kv[1]["net"])[0],
         "most_active": max(items, key=lambda kv: kv[1]["trades"])[0],
         "most_passive": min(items, key=lambda kv: kv[1]["trades"])[0],
         "fairest": fairest,
+        "most_titles": most_titles,
     }
 
 
@@ -1748,14 +1869,20 @@ def print_manager_overview(overview, manager_names, unit="pts"):
             f"  Fairest dealer:  {name_of(fair)} "
             f"({overview[fair]['even']} even/fair trades)"
         )
+    if rankings.get("most_titles") is not None:
+        champ = rankings["most_titles"]
+        print(
+            f"  Most titles:     {name_of(champ)} "
+            f"({overview[champ]['titles']} \U0001f3c6)"
+        )
 
     print()
     print(f"  RANKING by net {unit}:")
     print(
         f"  {'#':<4}{'Manager':<32}{'Trades':>7}{'W-L-T':>9}"
-        f"{'Even':>6}{'Received':>11}{'Net':>9}"
+        f"{'Even':>6}{'Titles':>7}{'Received':>11}{'Net':>9}"
     )
-    print("  " + "-" * 78)
+    print("  " + "-" * 85)
 
     ordered = sorted(
         overview.items(),
@@ -1772,8 +1899,8 @@ def print_manager_overview(overview, manager_names, unit="pts"):
 
         print(
             f"  {rank:<4}{label:<32}{entry['trades']:>7}{record:>9}"
-            f"{entry.get('even', 0):>6}{entry['received']:>11.1f}"
-            f"{entry['net']:>+9.1f}"
+            f"{entry.get('even', 0):>6}{entry.get('titles', 0):>7}"
+            f"{entry['received']:>11.1f}{entry['net']:>+9.1f}"
         )
 
     print()
@@ -1873,12 +2000,30 @@ def _par_by_season(per_week, key="par"):
     return {season: round(total, 1) for season, total in sorted(out.items())}
 
 
+def _games_by_season(per_week):
+    """{season: games} — count of weeks the player posted a line that season
+    (used for per-season PAR/game, e.g. the title-season rate)."""
+
+    out = defaultdict(int)
+    for wk in per_week:
+        out[wk["season"]] += 1
+    return dict(out)
+
+
 def _merge_seasons(assets):
     out = defaultdict(float)
     for asset in assets:
         for season, value in asset["by_season"].items():
             out[season] += value
     return {season: round(total, 1) for season, total in sorted(out.items())}
+
+
+def _merge_games(assets):
+    out = defaultdict(int)
+    for asset in assets:
+        for season, games in asset.get("games_by_season", {}).items():
+            out[season] += games
+    return dict(out)
 
 
 def review_asset_par(asset, trade, roster_id, ctx):
@@ -1901,7 +2046,8 @@ def review_asset_par(asset, trade, roster_id, ctx):
     if not base["resolved"]:
         base.update(
             {"par": 0.0, "par_pg": 0.0, "points": 0.0, "games": 0,
-             "hold": "unresolved (pick/FAAB)", "seasons": 0, "by_season": {}}
+             "hold": "unresolved (pick/FAAB)", "seasons": 0, "by_season": {},
+             "games_by_season": {}}
         )
         return base
 
@@ -1952,6 +2098,7 @@ def review_asset_par(asset, trade, roster_id, ctx):
             "hold": hold,
             "seasons": len(seasons),
             "by_season": _par_by_season(par["per_week"]),
+            "games_by_season": _games_by_season(par["per_week"]),
         }
     )
     return base
@@ -1989,6 +2136,7 @@ def build_par_review(trade, ctx):
             "points": points_sum,
             "par_pg": round(par_sum / games, 2) if games else 0.0,
             "by_season": _merge_seasons(assets),
+            "games_by_season": _merge_games(assets),
         }
         par_totals[roster_id] = par_sum
         points_totals[roster_id] = points_sum
@@ -2218,9 +2366,10 @@ def render_par_highlight(rank, review):
     else:
         tag = (review["lopsided"] or "notable").upper()
     when = format_trade_when(review)
+    title_marker = " · \U0001f3c6 TITLE" if review.get("contributed_title") else ""
     lines.append(
         f"\n#{rank}  [T{review['trade_no']}]  {tag} · {when} · "
-        f"{review['seasons_elapsed']} seasons elapsed"
+        f"{review['seasons_elapsed']} seasons elapsed{title_marker}"
     )
 
     winner = review["winner_roster"]
@@ -2253,6 +2402,11 @@ def render_par_highlight(rank, review):
                 lines.append(lineage)
 
     lines.append("  " + _par_takeaway(review, winner))
+    for c in review.get("title_contributions") or []:
+        lines.append(
+            f"  \U0001f3c6 contributed to {c['team']}'s {c['season']} title "
+            f"({c['par_pg']:.1f} PAR/G over {c['games']} g)"
+        )
     return "\n".join(lines)
 
 
@@ -2276,6 +2430,8 @@ def render_par_index_entry(review):
         bits.append(review["lopsided"].upper())
     elif review.get("even"):
         bits.append("EVEN")
+    if review.get("contributed_title"):
+        bits.append("\U0001f3c6")
     if winner is None:
         bits.append("even")
     else:
@@ -2405,6 +2561,7 @@ def _html_shell(title, body_html, generated=None):
   .badge.chained {{ background:#6e7681; color:#fff; }}
   .badge.even {{ background:#1f6feb; color:#fff; }}
   .badge.pending {{ background:#8957e5; color:#fff; }}
+  .badge.title {{ background:#bb8009; color:#fff; }}
   .tag.win {{ background:#238636; color:#fff; padding:.05rem .45rem; border-radius:6px; font-size:.72rem; font-weight:700; }}
   .pos {{ display:inline-block; background:#21262d; color:#adbac7; border:1px solid #30363d;
     border-radius:5px; padding:0 .35rem; font-size:.7rem; margin-left:.35rem; }}
@@ -2557,6 +2714,14 @@ def _html_trade_card(review, rank=None, detailed=False, anchor=False):
         badge = _html_class_badge(review["lopsided"])
         if badge:
             head_bits.append(badge)
+    if review.get("contributed_title"):
+        seasons = ", ".join(
+            c["season"] for c in review.get("title_contributions") or []
+        )
+        head_bits.append(
+            f'<span class="badge title" title="Contributed to {_h(seasons)} '
+            f'title">\U0001f3c6 TITLE</span>'
+        )
     head_bits.append(f'<span class="when">{_h(when)}</span>')
     head_bits.append(
         f'<span class="elapsed">{review["seasons_elapsed"]} seasons elapsed</span>'
@@ -2604,6 +2769,11 @@ def _html_manager_section(overview, manager_names):
             f'({overview[ranks["fairest"]]["even"]} even)'
             if ranks.get("fairest") is not None else ""
         )
+        + (
+            f' · Most titles: <strong>{_h(name_of(ranks["most_titles"]))}</strong> '
+            f'({overview[ranks["most_titles"]]["titles"]} \U0001f3c6)'
+            if ranks.get("most_titles") is not None else ""
+        )
         + '</p>'
     )
 
@@ -2620,6 +2790,7 @@ def _html_manager_section(overview, manager_names):
             f"<tr><td class='num'>{i}</td><td>{name_cell}</td>"
             f"<td class='num'>{e['trades']}</td><td class='num'>{record}</td>"
             f"<td class='num'>{e.get('even', 0)}</td>"
+            f"<td class='num'>{e.get('titles', 0)}</td>"
             f"<td class='num'>{e['received']:.1f}</td>"
             f"<td class='num'>{e['net']:+.1f}</td></tr>"
         )
@@ -2629,6 +2800,7 @@ def _html_manager_section(overview, manager_names):
         '<th scope="col" class="num">#</th><th scope="col">Manager</th>'
         '<th scope="col" class="num">Trades</th><th scope="col" class="num">W-L-T</th>'
         '<th scope="col" class="num">Even</th>'
+        '<th scope="col" class="num">\U0001f3c6</th>'
         '<th scope="col" class="num">Received</th><th scope="col" class="num">Net PAR</th>'
         f'</tr></thead><tbody>{rows}</tbody></table>'
     )
@@ -2940,8 +3112,14 @@ def main():
     attach_lineage(reviews, trades)
     flag_chained_trades(reviews)
     annotate_review_managers(reviews, directory)
+
+    champions = build_champions(chain, directory)
+    flag_title_contributions(
+        reviews, champions, directory["owner_by_season_roster"]
+    )
+
     overview = compute_manager_overview(
-        reviews, directory["owner_by_season_roster"]
+        reviews, directory["owner_by_season_roster"], champions
     )
 
     if args.html:

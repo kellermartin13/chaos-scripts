@@ -35,6 +35,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Trade review — championships (Tier 1) + title-contribution flag.** Detects
+  each season's champion from Sleeper's winners bracket and maps it to the
+  stable manager. The manager overview gains a 🏆 titles column and a "Most
+  titles" headline. A trade is flagged **🏆 TITLE** (highlights, index, and
+  HTML) when the acquiring manager won a title and the assets they got produced
+  a strong PAR/game rate *in that title season* — measured over the post-trade
+  stretch (PAR is counted from the trade week forward), so a mid-season
+  acquisition is judged on the run it actually led to, not the whole season or
+  games before the trade. A trade can be credited to a later title, and to more
+  than one. Evidence-based, not causal (min games + PAR/game threshold guard
+  against benched/fluke pickups claiming a ring).
 - **Trade review — `PENDING` tag for unfinalized trades.** A trade whose return
   still includes an unresolved (undrafted) pick is tagged `PENDING` and held
   out of the LOPSIDED/HEIST/EVEN verdict — its realized PAR understates what's
