@@ -866,15 +866,21 @@ def hold_window_end(
     return None
 
 
-def build_trade_ownership(trades):
+def build_trade_ownership(trades, pick_index=None, players=None):
     """
-    Per-player acquisition timeline derived from the TRADES themselves (their
-    `adds`), ordered chronologically by status_updated.
+    Per-player acquisition timeline derived from the TRADES themselves,
+    ordered chronologically by status_updated.
 
-    This is the same data the report displays, so it can't diverge from what's
-    shown — unlike the separately-fetched ownership timeline, it needs no
-    `drops` and doesn't depend on the transactions endpoint being complete or
-    consistent. It's the robust source for bounding a re-traded asset.
+    Two sources of acquisition:
+      - direct player `adds` (player_id -> receiving roster), and
+      - traded draft `picks` resolved to the player they became (owner_id is
+        the receiving roster). A player can enter a league via a traded pick
+        and never appear in any `adds`, and a pick can be traded through
+        several teams before it's used — so pick movements are genuine
+        ownership transfers of the resolved player and must bound holds too.
+
+    Built from the same trades the report shows, so it can't diverge from
+    what's displayed; needs no `drops`; robust to transaction-endpoint gaps.
 
     Returns {player_id: [{"key": ((season_int, week), seq), "season", "week",
     "roster_id"}, ...]} sorted ascending.
@@ -882,17 +888,27 @@ def build_trade_ownership(trades):
 
     acquisitions = defaultdict(list)
 
+    def record(player_id, roster_id, trade, seq):
+        acquisitions[player_id].append(
+            {
+                "key": (_wk_key(trade["season"], trade["week"]), seq),
+                "season": trade["season"],
+                "week": trade["week"],
+                "roster_id": roster_id,
+            }
+        )
+
     for trade in trades:
         seq = trade.get("status_updated") or 0
+
         for player_id, roster_id in (trade.get("adds") or {}).items():
-            acquisitions[player_id].append(
-                {
-                    "key": (_wk_key(trade["season"], trade["week"]), seq),
-                    "season": trade["season"],
-                    "week": trade["week"],
-                    "roster_id": roster_id,
-                }
-            )
+            record(player_id, roster_id, trade, seq)
+
+        if pick_index is not None:
+            for pick in (trade.get("draft_picks") or []):
+                resolved = resolve_pick(pick, pick_index, players)
+                if resolved.get("resolved") and resolved.get("player_id"):
+                    record(resolved["player_id"], pick.get("owner_id"), trade, seq)
 
     for events in acquisitions.values():
         events.sort(key=lambda e: e["key"])
@@ -2785,12 +2801,14 @@ def main():
         return _txn_cache[key]
 
     stats_cache = WeeklyStatsCache()
+    pick_index = build_pick_index(chain)
 
     # Ownership is derived from ALL trades (a re-trade in a later season must
     # still bound an earlier acquisition), even when --season filters which
-    # trades are reviewed.
+    # trades are reviewed. Picks are resolved to the players they became so a
+    # player acquired via a traded pick is tracked too.
     all_trades = collect_trades(chain, fetch=txn_fetch)
-    trade_ownership = build_trade_ownership(all_trades)
+    trade_ownership = build_trade_ownership(all_trades, pick_index, players)
 
     trades = all_trades
     if args.season:
@@ -2799,7 +2817,7 @@ def main():
     ctx = {
         "chain_index": chain_index,
         "players": players,
-        "pick_index": build_pick_index(chain),
+        "pick_index": pick_index,
         "team_names": team_names_by_season,
         "stats_cache": stats_cache,
         "timeline": build_ownership_timeline(chain, fetch=txn_fetch),

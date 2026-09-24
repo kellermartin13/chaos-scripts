@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Trade review — players acquired via traded picks are ownership-tracked.**
+  A player who enters the league through a traded draft pick (resolved to the
+  player he became), where that pick was dealt through several teams before the
+  draft, was credited to *every* trade the pick passed through — never
+  appearing in any `adds`, so the ownership logic couldn't bound it (e.g. James
+  Cook counted in full on two different 2023 trades). `build_trade_ownership`
+  now resolves traded picks to their players and records the pick's new owner
+  as the acquiring roster, so only the team that actually used the pick keeps
+  the production.
 - **Trade review — ownership bounds derived from the trades themselves.**
   Hold windows are now bounded using the same trade list the report displays
   (a received player is held until the next trade that moved him), instead of

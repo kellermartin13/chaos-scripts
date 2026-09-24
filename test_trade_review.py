@@ -1821,3 +1821,51 @@ class TestEarliestEnd:
 
     def test_all_none_is_none(self):
         assert tr._earliest_end(None, None) is None
+
+
+# ---------------------------------------------------------------------------
+# Pick-derived ownership (a player acquired via a traded pick — the real Cook)
+# ---------------------------------------------------------------------------
+
+class TestPickDerivedOwnership:
+
+    @pytest.fixture
+    def pick_index(self):
+        # 2023 startup round-10 pick (original owner roster 3) became Cook.
+        return {("2023", 10, 3): {"player_id": "8138",
+                                  "name": "James Cook", "position": "RB"}}
+
+    @pytest.fixture
+    def trades(self):
+        # Same pick traded roster 3 -> roster 10 (T8) -> roster 1 (T9); no
+        # player `adds` for Cook anywhere (he enters via the pick).
+        return [
+            {"season": "2023", "week": 1, "status_updated": 100, "adds": {},
+             "draft_picks": [{"season": "2023", "round": 10,
+                              "roster_id": 3, "owner_id": 10}]},
+            {"season": "2023", "week": 1, "status_updated": 200, "adds": {},
+             "draft_picks": [{"season": "2023", "round": 10,
+                              "roster_id": 3, "owner_id": 1}]},
+        ]
+
+    def test_pick_creates_ownership_events(self, trades, pick_index):
+        ownership = tr.build_trade_ownership(trades, pick_index)
+
+        assert [e["roster_id"] for e in ownership["8138"]] == [10, 1]
+
+    def test_first_pick_owner_is_bounded(self, trades, pick_index):
+        ownership = tr.build_trade_ownership(trades, pick_index)
+
+        assert tr.trade_hold_end(ownership, "8138", "2023", 1, 100) == (
+            "2023", 1
+        )
+
+    def test_final_pick_owner_still_held(self, trades, pick_index):
+        ownership = tr.build_trade_ownership(trades, pick_index)
+
+        assert tr.trade_hold_end(ownership, "8138", "2023", 1, 200) is None
+
+    def test_without_pick_index_picks_are_ignored(self, trades):
+        ownership = tr.build_trade_ownership(trades)
+
+        assert "8138" not in ownership
