@@ -2165,3 +2165,95 @@ class TestManagerTitles:
 
         assert overview["A"]["titles"] == 0
         assert tr.manager_rankings(overview)["most_titles"] is None
+
+
+# ---------------------------------------------------------------------------
+# build_championship_summary + championship section rendering
+# ---------------------------------------------------------------------------
+
+class TestChampionshipSummary:
+
+    @pytest.fixture
+    def reviews(self):
+        return [
+            {"trade_no": 7, "title_contributions": [
+                {"season": "2025", "team": "Champ", "par_pg": 8.0, "games": 6,
+                 "par": 48.0, "assets": [{"name": "Late Stud", "par": 48.0}]}]},
+            {"trade_no": 3, "title_contributions": [
+                {"season": "2025", "team": "Champ", "par_pg": 4.0, "games": 10,
+                 "par": 40.0, "assets": [{"name": "Steady", "par": 40.0}]}]},
+            {"trade_no": 1, "title_contributions": []},
+        ]
+
+    def test_groups_by_season_ordered_by_par(self, reviews):
+        summary = tr.build_championship_summary(
+            reviews, {"2025": "o"}, {"o": "Team Lara"}
+        )
+
+        assert summary[0]["season"] == "2025"
+        assert summary[0]["champion"] == "Team Lara"
+        assert [t["trade_no"] for t in summary[0]["trades"]] == [7, 3]
+
+    def test_title_with_no_qualifying_trade_still_listed(self):
+        summary = tr.build_championship_summary(
+            [], {"2024": "o"}, {"o": "Someone"}
+        )
+
+        assert summary[0]["season"] == "2024" and summary[0]["trades"] == []
+
+    def test_text_section_explains_trades(self, reviews, capsys):
+        summary = tr.build_championship_summary(
+            reviews, {"2025": "o"}, {"o": "Team Lara"}
+        )
+        tr.print_championship_section(summary)
+        out = capsys.readouterr().out
+
+        assert "CHAMPIONSHIP TRADES" in out
+        assert "2025 — Team Lara" in out
+        assert "Late Stud (48)" in out
+
+    def test_html_section_has_table_and_link(self, reviews):
+        summary = tr.build_championship_summary(
+            reviews, {"2025": "o"}, {"o": "Team Lara"}
+        )
+        out = tr._html_championship_section(summary)
+
+        assert "Championship Trades" in out
+        assert 'href="#t7"' in out
+        assert "Late Stud (48)" in out
+
+    def test_empty_summary_renders_nothing(self):
+        assert tr._html_championship_section([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# Distinct-week counting (a fantasy game is a week, not a player-game)
+# ---------------------------------------------------------------------------
+
+class TestDistinctWeekGames:
+
+    def test_weeks_by_season_dedups_weeks(self):
+        per_week = [
+            {"season": "2025", "week": 1}, {"season": "2025", "week": 1},
+            {"season": "2025", "week": 2}, {"season": "2026", "week": 1},
+        ]
+
+        assert tr._weeks_by_season(per_week) == {"2025": [1, 2], "2026": [1]}
+
+    def test_merge_games_unions_not_sums(self):
+        # Two acquired players active in overlapping weeks -> distinct weeks,
+        # not player-games (regression: this used to sum to 6 -> "30g" bug).
+        assets = [
+            {"weeks_by_season": {"2025": [1, 2, 3]}},
+            {"weeks_by_season": {"2025": [2, 3, 4]}},
+        ]
+
+        assert tr._merge_games(assets) == {"2025": 4}
+
+    def test_merge_games_never_exceeds_season(self):
+        assets = [
+            {"weeks_by_season": {"2025": list(range(1, 19))}},
+            {"weeks_by_season": {"2025": list(range(1, 19))}},
+        ]
+
+        assert tr._merge_games(assets)["2025"] == 18  # not 36
