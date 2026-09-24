@@ -73,6 +73,12 @@ LOPSIDED_MIN_MARGIN = 50.0
 LOPSIDED_RATIO = 2.0
 HEIST_RATIO = 3.0
 
+# A trade is "even" (a fair deal) when the two best sides delivered comparable
+# PAR: the winner is within EVEN_RATIO x of the runner-up AND both sides
+# produced real value (>= EVEN_MIN_PAR), so a 0-0 nothing-trade isn't "fair".
+EVEN_RATIO = 1.25
+EVEN_MIN_PAR = 25.0
+
 
 # =============================================================================
 # HTTP
@@ -1380,6 +1386,25 @@ def assess_lopsidedness(sides_totals, winner_roster, margin):
     return None
 
 
+def assess_evenness(sides_totals):
+    """
+    True when a trade is a fair deal: the two best sides delivered comparable
+    PAR (within EVEN_RATIO x) and both produced real value (>= EVEN_MIN_PAR).
+    A 0-0 or tiny trade is not "even" — it's a non-event. Mutually exclusive
+    with lopsided/heist by ratio.
+    """
+
+    ordered = sorted(sides_totals.values(), reverse=True)
+    if len(ordered) < 2:
+        return False
+
+    top, second = ordered[0], ordered[1]
+    if second < EVEN_MIN_PAR or top <= 0:
+        return False
+
+    return (top / second) <= EVEN_RATIO
+
+
 def build_trade_review(trade, players, pick_index, chain_index, stats_cache):
     """
     Assemble a single reviewed trade: each side's scored assets, side totals,
@@ -1488,6 +1513,7 @@ def compute_manager_overview(reviews, owner_by_season_roster):
             "wins": 0,
             "losses": 0,
             "ties": 0,
+            "even": 0,
             "received": 0.0,
             "net": 0.0,
         }
@@ -1508,6 +1534,7 @@ def compute_manager_overview(reviews, owner_by_season_roster):
                     "wins": 0,
                     "losses": 0,
                     "ties": 0,
+                    "even": 0,
                     "received": 0.0,
                     "net": 0.0,
                 },
@@ -1518,6 +1545,9 @@ def compute_manager_overview(reviews, owner_by_season_roster):
             entry["trades"] += 1
             entry["received"] += received
             entry["net"] += received - given
+
+            if review.get("even"):
+                entry["even"] += 1
 
             if winner is None:
                 entry["ties"] += 1
@@ -1546,15 +1576,21 @@ def manager_rankings(overview):
             "worst": None,
             "most_active": None,
             "most_passive": None,
+            "fairest": None,
         }
 
     items = list(overview.items())
+
+    # Fairest dealer = most even (fair) trades reached; None if nobody has any.
+    fairest_owner, fairest_entry = max(items, key=lambda kv: kv[1].get("even", 0))
+    fairest = fairest_owner if fairest_entry.get("even", 0) > 0 else None
 
     return {
         "best": max(items, key=lambda kv: kv[1]["net"])[0],
         "worst": min(items, key=lambda kv: kv[1]["net"])[0],
         "most_active": max(items, key=lambda kv: kv[1]["trades"])[0],
         "most_passive": min(items, key=lambda kv: kv[1]["trades"])[0],
+        "fairest": fairest,
     }
 
 
@@ -1706,14 +1742,20 @@ def print_manager_overview(overview, manager_names, unit="pts"):
         f"  Most passive:    {name_of(passive)} "
         f"({overview[passive]['trades']} trades)"
     )
+    if rankings.get("fairest") is not None:
+        fair = rankings["fairest"]
+        print(
+            f"  Fairest dealer:  {name_of(fair)} "
+            f"({overview[fair]['even']} even/fair trades)"
+        )
 
     print()
     print(f"  RANKING by net {unit}:")
     print(
         f"  {'#':<4}{'Manager':<32}{'Trades':>7}{'W-L-T':>9}"
-        f"{'Received':>11}{'Net':>9}"
+        f"{'Even':>6}{'Received':>11}{'Net':>9}"
     )
-    print("  " + "-" * 72)
+    print("  " + "-" * 78)
 
     ordered = sorted(
         overview.items(),
@@ -1730,7 +1772,8 @@ def print_manager_overview(overview, manager_names, unit="pts"):
 
         print(
             f"  {rank:<4}{label:<32}{entry['trades']:>7}{record:>9}"
-            f"{entry['received']:>11.1f}{entry['net']:>+9.1f}"
+            f"{entry.get('even', 0):>6}{entry['received']:>11.1f}"
+            f"{entry['net']:>+9.1f}"
         )
 
     print()
@@ -1952,6 +1995,7 @@ def build_par_review(trade, ctx):
 
     winner, margin = verdict(par_totals)
     lopsided = assess_lopsidedness(par_totals, winner, margin)
+    even = (lopsided is None) and assess_evenness(par_totals)
 
     latest = int(ctx["chain_index"]["seasons"][-1])
     return {
@@ -1965,6 +2009,7 @@ def build_par_review(trade, ctx):
         "winner_roster": winner,
         "margin": margin,
         "lopsided": lopsided,
+        "even": even,
         "seasons_elapsed": latest - int(trade["season"]) + 1,
     }
 
@@ -2070,6 +2115,16 @@ def _par_takeaway(review, winner):
             "their return."
         )
 
+    if review.get("even"):
+        top2 = sorted(
+            review["sides"].values(), key=lambda s: s["par"], reverse=True
+        )[:2]
+        a, b = top2[0], top2[1]
+        return (
+            f"\u2192 Fair deal: {a['label']} ({a['par']:.0f} PAR) and "
+            f"{b['label']} ({b['par']:.0f} PAR) got comparable value."
+        )
+
     if winner is None:
         return "\u2192 Even by PAR."
 
@@ -2121,6 +2176,7 @@ def flag_chained_trades(reviews):
                         "trade_no": became["trade_no"],
                     }
                     review["lopsided"] = None  # not a heist — a pass-through
+                    review["even"] = False      # pass-through, not a fair deal
                     break
             if review["chained"]:
                 break
@@ -2129,7 +2185,7 @@ def flag_chained_trades(reviews):
 def render_par_highlight(rank, review):
     lines = []
     tag = "CHAINED" if review.get("chained") else (
-        review["lopsided"] or "notable"
+        "EVEN" if review.get("even") else (review["lopsided"] or "notable")
     ).upper()
     when = format_trade_when(review)
     lines.append(
@@ -2186,6 +2242,8 @@ def render_par_index_entry(review):
         bits.append("CHAINED")
     elif review["lopsided"]:
         bits.append(review["lopsided"].upper())
+    elif review.get("even"):
+        bits.append("EVEN")
     if winner is None:
         bits.append("even")
     else:
@@ -2313,6 +2371,7 @@ def _html_shell(title, body_html, generated=None):
   .badge.heist {{ background:#da3633; color:#fff; }}
   .badge.lopsided {{ background:#9e6a03; color:#fff; }}
   .badge.chained {{ background:#6e7681; color:#fff; }}
+  .badge.even {{ background:#1f6feb; color:#fff; }}
   .tag.win {{ background:#238636; color:#fff; padding:.05rem .45rem; border-radius:6px; font-size:.72rem; font-weight:700; }}
   .pos {{ display:inline-block; background:#21262d; color:#adbac7; border:1px solid #30363d;
     border-radius:5px; padding:0 .35rem; font-size:.7rem; margin-left:.35rem; }}
@@ -2457,6 +2516,8 @@ def _html_trade_card(review, rank=None, detailed=False, anchor=False):
     head_bits.append(f'<span class="tno">T{review["trade_no"]}</span>')
     if review.get("chained"):
         head_bits.append('<span class="badge chained">CHAINED</span>')
+    elif review.get("even"):
+        head_bits.append('<span class="badge even">EVEN</span>')
     else:
         badge = _html_class_badge(review["lopsided"])
         if badge:
@@ -2502,7 +2563,13 @@ def _html_manager_section(overview, manager_names):
         f'Worst: <strong>{_h(name_of(ranks["worst"]))}</strong> '
         f'({overview[ranks["worst"]]["net"]:+.1f}) · '
         f'Most active: <strong>{_h(name_of(ranks["most_active"]))}</strong> '
-        f'({overview[ranks["most_active"]]["trades"]} trades)</p>'
+        f'({overview[ranks["most_active"]]["trades"]} trades)'
+        + (
+            f' · Fairest: <strong>{_h(name_of(ranks["fairest"]))}</strong> '
+            f'({overview[ranks["fairest"]]["even"]} even)'
+            if ranks.get("fairest") is not None else ""
+        )
+        + '</p>'
     )
 
     rows = ""
@@ -2517,6 +2584,7 @@ def _html_manager_section(overview, manager_names):
         rows += (
             f"<tr><td class='num'>{i}</td><td>{name_cell}</td>"
             f"<td class='num'>{e['trades']}</td><td class='num'>{record}</td>"
+            f"<td class='num'>{e.get('even', 0)}</td>"
             f"<td class='num'>{e['received']:.1f}</td>"
             f"<td class='num'>{e['net']:+.1f}</td></tr>"
         )
@@ -2525,6 +2593,7 @@ def _html_manager_section(overview, manager_names):
         '<table><caption>Ranked by net PAR</caption><thead><tr>'
         '<th scope="col" class="num">#</th><th scope="col">Manager</th>'
         '<th scope="col" class="num">Trades</th><th scope="col" class="num">W-L-T</th>'
+        '<th scope="col" class="num">Even</th>'
         '<th scope="col" class="num">Received</th><th scope="col" class="num">Net PAR</th>'
         f'</tr></thead><tbody>{rows}</tbody></table>'
     )

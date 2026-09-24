@@ -35,6 +35,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Trade review — `EVEN` tag and fairest-dealer highlight.** A trade whose two
+  best sides delivered comparable PAR (within 25%) and both produced real value
+  (≥ 25 PAR) is tagged `EVEN` — a genuinely fair deal — in the highlights,
+  chronological index, and HTML (blue badge), with a "Fair deal" takeaway. The
+  manager overview now counts each manager's even trades, adds an **Even**
+  column, and names the **Fairest dealer** (most fair deals reached).
 - **Trade review — `--debug-player ID_OR_NAME`.** Prints an ownership
   diagnosis for one player to stderr (every trade that moved him, the timeline
   events, and the computed hold-window end per trade) for pinning double-counts
