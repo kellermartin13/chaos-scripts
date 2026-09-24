@@ -1950,3 +1950,98 @@ class TestFairestDealer:
         )
 
         assert rankings["fairest"] is None
+
+
+# ---------------------------------------------------------------------------
+# PENDING trades (unresolved picks held out of the verdict)
+# ---------------------------------------------------------------------------
+
+class TestPendingTrades:
+
+    @pytest.fixture
+    def ctx(self):
+        stats = {
+            ("2025", 1): {"p1": {"rec": 60, "gp": 1}},
+            ("2025", 2): {"p1": {"rec": 60, "gp": 1}},
+        }
+        return {
+            "chain_index": {"seasons": ["2025"], "scoring": {"2025": {"rec": 1.0}}},
+            "players": {"p1": {"full_name": "Stud", "position": "WR"}},
+            "pick_index": {},          # 2027 pick won't resolve -> pending
+            "team_names": {},
+            "stats_cache": tr.WeeklyStatsCache(
+                fetch=lambda s, w: stats.get((str(s), w), {})
+            ),
+            "timeline": {},
+            "trade_ownership": {},
+            "floor": True,
+            "baseline_cache": StubBaselines({}),
+        }
+
+    @pytest.fixture
+    def trade(self):
+        return {
+            "transaction_id": "t", "season": "2025", "week": 1,
+            "status_updated": 1, "roster_ids": [1, 2],
+            "adds": {"p1": 1},
+            "draft_picks": [{"season": "2027", "round": 1,
+                             "roster_id": 2, "owner_id": 2}],
+            "waiver_budget": [],
+        }
+
+    def test_unresolved_pick_makes_trade_pending(self, trade, ctx):
+        review = tr.build_par_review(trade, ctx)
+
+        assert review["pending"] is True
+
+    def test_pending_suppresses_lopsided(self, trade, ctx):
+        # Stud (120 PAR) vs a 0 pick would be a HEIST if not held out.
+        review = tr.build_par_review(trade, ctx)
+
+        assert review["lopsided"] is None
+
+    def test_pending_picks_are_captured(self, trade, ctx):
+        review = tr.build_par_review(trade, ctx)
+
+        assert any("2027" in p for p in review["pending_picks"])
+
+
+class TestPendingRender:
+
+    @staticmethod
+    def _review():
+        return {
+            "trade_no": 3, "season": "2025", "week": 1, "seasons_elapsed": 1,
+            "winner_roster": 1, "margin": 120.0, "lopsided": None,
+            "even": False, "pending": True,
+            "pending_picks": ["2027 Round 1 pick (pending — no draft yet)"],
+            "sides": {
+                1: {"label": "A", "par": 120.0, "points": 300, "par_pg": 6.0,
+                    "by_season": {"2025": 120.0},
+                    "assets": [{"name": "Stud", "position": "WR", "par": 120.0,
+                                "par_pg": 6.0, "points": 300,
+                                "hold": "still held · 1 seas", "became": None}]},
+                2: {"label": "B", "par": 0.0, "points": 0, "par_pg": 0.0,
+                    "by_season": {},
+                    "assets": [{"name": "2027 Round 1 pick", "position": None,
+                                "par": 0.0, "par_pg": 0.0, "points": 0,
+                                "hold": "unresolved (pick/FAAB)",
+                                "became": None}]},
+            },
+        }
+
+    def test_highlight_tag_is_pending_not_heist(self):
+        out = tr.render_par_highlight(1, self._review())
+
+        assert "PENDING" in out and "HEIST" not in out
+
+    def test_index_shows_pending(self):
+        assert "PENDING" in tr.render_par_index_entry(self._review())
+
+    def test_takeaway_flags_pending(self):
+        assert "Pending" in tr._par_takeaway(self._review(), 1)
+
+    def test_html_badge_pending(self):
+        out = tr._html_trade_card(self._review(), detailed=False)
+
+        assert '<span class="badge pending">PENDING</span>' in out

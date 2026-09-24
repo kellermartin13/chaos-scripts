@@ -1997,6 +1997,21 @@ def build_par_review(trade, ctx):
     lopsided = assess_lopsidedness(par_totals, winner, margin)
     even = (lopsided is None) and assess_evenness(par_totals)
 
+    # A trade whose return still includes an unresolved (undrafted) pick isn't
+    # finalized — its realized PAR understates what's still coming. Flag it
+    # PENDING and hold it out of the lopsided/even verdict so we don't grade a
+    # not-yet-resolved trade as a heist (or a fair deal).
+    pending_picks = [
+        asset.get("label") or asset.get("name") or "pick"
+        for side in sides.values()
+        for asset in side["assets"]
+        if asset.get("kind") == "pick" and not asset.get("resolved")
+    ]
+    pending = bool(pending_picks)
+    if pending:
+        lopsided = None
+        even = False
+
     latest = int(ctx["chain_index"]["seasons"][-1])
     return {
         "transaction_id": trade.get("transaction_id"),
@@ -2010,6 +2025,8 @@ def build_par_review(trade, ctx):
         "margin": margin,
         "lopsided": lopsided,
         "even": even,
+        "pending": pending,
+        "pending_picks": pending_picks,
         "seasons_elapsed": latest - int(trade["season"]) + 1,
     }
 
@@ -2107,6 +2124,14 @@ def _par_lineage_line(asset):
 
 
 def _par_takeaway(review, winner):
+    if review.get("pending"):
+        picks = ", ".join(review.get("pending_picks") or []) or "a pick"
+        return (
+            f"\u2192 Pending: return still includes an unresolved pick "
+            f"({picks}) — not final until it drafts; realized PAR understates "
+            "it."
+        )
+
     if review.get("chained") and review.get("chain_note"):
         note = review["chain_note"]
         return (
@@ -2184,9 +2209,14 @@ def flag_chained_trades(reviews):
 
 def render_par_highlight(rank, review):
     lines = []
-    tag = "CHAINED" if review.get("chained") else (
-        "EVEN" if review.get("even") else (review["lopsided"] or "notable")
-    ).upper()
+    if review.get("pending"):
+        tag = "PENDING"
+    elif review.get("chained"):
+        tag = "CHAINED"
+    elif review.get("even"):
+        tag = "EVEN"
+    else:
+        tag = (review["lopsided"] or "notable").upper()
     when = format_trade_when(review)
     lines.append(
         f"\n#{rank}  [T{review['trade_no']}]  {tag} · {when} · "
@@ -2238,7 +2268,9 @@ def render_par_index_entry(review):
     winner = review["winner_roster"]
 
     bits = [f"T{review['trade_no']:<4}{when}"]
-    if review.get("chained"):
+    if review.get("pending"):
+        bits.append("PENDING")
+    elif review.get("chained"):
         bits.append("CHAINED")
     elif review["lopsided"]:
         bits.append(review["lopsided"].upper())
@@ -2372,6 +2404,7 @@ def _html_shell(title, body_html, generated=None):
   .badge.lopsided {{ background:#9e6a03; color:#fff; }}
   .badge.chained {{ background:#6e7681; color:#fff; }}
   .badge.even {{ background:#1f6feb; color:#fff; }}
+  .badge.pending {{ background:#8957e5; color:#fff; }}
   .tag.win {{ background:#238636; color:#fff; padding:.05rem .45rem; border-radius:6px; font-size:.72rem; font-weight:700; }}
   .pos {{ display:inline-block; background:#21262d; color:#adbac7; border:1px solid #30363d;
     border-radius:5px; padding:0 .35rem; font-size:.7rem; margin-left:.35rem; }}
@@ -2514,7 +2547,9 @@ def _html_trade_card(review, rank=None, detailed=False, anchor=False):
     if rank is not None:
         head_bits.append(f'<span class="rank">#{rank}</span>')
     head_bits.append(f'<span class="tno">T{review["trade_no"]}</span>')
-    if review.get("chained"):
+    if review.get("pending"):
+        head_bits.append('<span class="badge pending">PENDING</span>')
+    elif review.get("chained"):
         head_bits.append('<span class="badge chained">CHAINED</span>')
     elif review.get("even"):
         head_bits.append('<span class="badge even">EVEN</span>')
