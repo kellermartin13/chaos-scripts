@@ -2175,14 +2175,20 @@ class TestChampionshipSummary:
 
     @pytest.fixture
     def reviews(self):
+        # T7 made in the 2024 offseason but fed the 2025 title; T3 made mid-2025.
         return [
-            {"trade_no": 7, "title_contributions": [
+            {"trade_no": 7, "season": "2024", "week": 1,
+             "status_updated": 1717200000000,  # 2024-06 -> "2024 offseason"
+             "title_contributions": [
                 {"season": "2025", "team": "Champ", "par_pg": 8.0, "games": 6,
                  "par": 48.0, "assets": [{"name": "Late Stud", "par": 48.0}]}]},
-            {"trade_no": 3, "title_contributions": [
+            {"trade_no": 3, "season": "2025", "week": 6,
+             "status_updated": 1730000000000,  # 2025 in-season -> "2025 wk6"
+             "title_contributions": [
                 {"season": "2025", "team": "Champ", "par_pg": 4.0, "games": 10,
                  "par": 40.0, "assets": [{"name": "Steady", "par": 40.0}]}]},
-            {"trade_no": 1, "title_contributions": []},
+            {"trade_no": 1, "season": "2025", "week": 1, "status_updated": 0,
+             "title_contributions": []},
         ]
 
     def test_groups_by_season_ordered_by_par(self, reviews):
@@ -2194,6 +2200,14 @@ class TestChampionshipSummary:
         assert summary[0]["champion"] == "Team Lara"
         assert [t["trade_no"] for t in summary[0]["trades"]] == [7, 3]
 
+    def test_captures_when_trade_was_made(self, reviews):
+        summary = tr.build_championship_summary(
+            reviews, {"2025": "o"}, {"o": "Team Lara"}
+        )
+
+        # T7 fed the 2025 title but was made in the 2024 offseason.
+        assert summary[0]["trades"][0]["made"] == "2024 offseason"
+
     def test_title_with_no_qualifying_trade_still_listed(self):
         summary = tr.build_championship_summary(
             [], {"2024": "o"}, {"o": "Someone"}
@@ -2201,26 +2215,31 @@ class TestChampionshipSummary:
 
         assert summary[0]["season"] == "2024" and summary[0]["trades"] == []
 
-    def test_text_section_explains_trades(self, reviews, capsys):
+    def test_text_section_shows_made_year_and_title_season_scope(
+        self, reviews, capsys
+    ):
         summary = tr.build_championship_summary(
             reviews, {"2025": "o"}, {"o": "Team Lara"}
         )
         tr.print_championship_section(summary)
         out = capsys.readouterr().out
 
-        assert "CHAMPIONSHIP TRADES" in out
-        assert "2025 — Team Lara" in out
+        assert "made 2024 offseason" in out          # when trade was made
+        assert "games in 2025" in out                 # title-season scoping
+        assert "title-season games" in out            # explicit caption
         assert "Late Stud (48)" in out
 
-    def test_html_section_has_table_and_link(self, reviews):
+    def test_html_section_has_made_column_and_scoped_headers(self, reviews):
         summary = tr.build_championship_summary(
             reviews, {"2025": "o"}, {"o": "Team Lara"}
         )
         out = tr._html_championship_section(summary)
 
-        assert "Championship Trades" in out
         assert 'href="#t7"' in out
-        assert "Late Stud (48)" in out
+        assert "<th scope=\"col\">Made</th>" in out
+        assert "2024 offseason" in out                # made-when in a row
+        assert "PAR/G (2025)" in out                  # title-season scoping
+        assert "title-season games" in out            # caption
 
     def test_empty_summary_renders_nothing(self):
         assert tr._html_championship_section([]) == ""
