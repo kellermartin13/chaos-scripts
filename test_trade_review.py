@@ -2224,3 +2224,36 @@ class TestChampionshipSummary:
 
     def test_empty_summary_renders_nothing(self):
         assert tr._html_championship_section([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# Distinct-week counting (a fantasy game is a week, not a player-game)
+# ---------------------------------------------------------------------------
+
+class TestDistinctWeekGames:
+
+    def test_weeks_by_season_dedups_weeks(self):
+        per_week = [
+            {"season": "2025", "week": 1}, {"season": "2025", "week": 1},
+            {"season": "2025", "week": 2}, {"season": "2026", "week": 1},
+        ]
+
+        assert tr._weeks_by_season(per_week) == {"2025": [1, 2], "2026": [1]}
+
+    def test_merge_games_unions_not_sums(self):
+        # Two acquired players active in overlapping weeks -> distinct weeks,
+        # not player-games (regression: this used to sum to 6 -> "30g" bug).
+        assets = [
+            {"weeks_by_season": {"2025": [1, 2, 3]}},
+            {"weeks_by_season": {"2025": [2, 3, 4]}},
+        ]
+
+        assert tr._merge_games(assets) == {"2025": 4}
+
+    def test_merge_games_never_exceeds_season(self):
+        assets = [
+            {"weeks_by_season": {"2025": list(range(1, 19))}},
+            {"weeks_by_season": {"2025": list(range(1, 19))}},
+        ]
+
+        assert tr._merge_games(assets)["2025"] == 18  # not 36

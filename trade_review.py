@@ -2046,14 +2046,16 @@ def _par_by_season(per_week, key="par"):
     return {season: round(total, 1) for season, total in sorted(out.items())}
 
 
-def _games_by_season(per_week):
-    """{season: games} — count of weeks the player posted a line that season
-    (used for per-season PAR/game, e.g. the title-season rate)."""
+def _weeks_by_season(per_week):
+    """{season: [weeks]} — the weeks the player posted a line that season.
+    Kept as weeks (not a count) so a side can union across its assets: a
+    fantasy 'game' is a week, so two acquired players active the same week is
+    one game, not two."""
 
-    out = defaultdict(int)
+    out = defaultdict(set)
     for wk in per_week:
-        out[wk["season"]] += 1
-    return dict(out)
+        out[wk["season"]].add(wk["week"])
+    return {season: sorted(weeks) for season, weeks in out.items()}
 
 
 def _merge_seasons(assets):
@@ -2065,11 +2067,15 @@ def _merge_seasons(assets):
 
 
 def _merge_games(assets):
-    out = defaultdict(int)
+    """Side-level {season: distinct game (week) count} — the union of the
+    acquired players' active weeks, so overlapping weeks aren't double-counted
+    (a fantasy game is a week/matchup, not a player-game)."""
+
+    weeks = defaultdict(set)
     for asset in assets:
-        for season, games in asset.get("games_by_season", {}).items():
-            out[season] += games
-    return dict(out)
+        for season, wks in asset.get("weeks_by_season", {}).items():
+            weeks[season].update(wks)
+    return {season: len(wks) for season, wks in weeks.items()}
 
 
 def review_asset_par(asset, trade, roster_id, ctx):
@@ -2093,7 +2099,7 @@ def review_asset_par(asset, trade, roster_id, ctx):
         base.update(
             {"par": 0.0, "par_pg": 0.0, "points": 0.0, "games": 0,
              "hold": "unresolved (pick/FAAB)", "seasons": 0, "by_season": {},
-             "games_by_season": {}}
+             "weeks_by_season": {}}
         )
         return base
 
@@ -2144,7 +2150,7 @@ def review_asset_par(asset, trade, roster_id, ctx):
             "hold": hold,
             "seasons": len(seasons),
             "by_season": _par_by_season(par["per_week"]),
-            "games_by_season": _games_by_season(par["per_week"]),
+            "weeks_by_season": _weeks_by_season(par["per_week"]),
         }
     )
     return base
