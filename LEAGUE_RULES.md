@@ -39,7 +39,7 @@ No action needed. Calculated from official data every Wednesday.
 | **Dropped Pass** | **+5** | A started player is charted with a drop (FTN charting). |
 | **Red Zone Turnover** | **+5** | Every started player involved in a turnover inside the opponent's 20-yard line — the player who committed it (QB on an interception, or the fumbler) **and** any started defender who caused it (interceptor, fumble forcer, fumble recoverer). |
 | **Non-QB TD Pass** | **+20** | A started non-QB (RB/WR/TE/FB) throws a touchdown pass (trick play). |
-| **Taunting / Unsportsmanlike** | **+15** | A started player is flagged for taunting or unsportsmanlike conduct. |
+| **Taunting / Unsportsmanlike / Roughness** | **+15** | A started player is flagged for taunting, unsportsmanlike conduct, roughing the passer, or unnecessary roughness. |
 | **Pre-Snap Penalty** | **+5** | A started player commits a pre-snap penalty (false start, delay of game, illegal formation/shift/motion). |
 | **Penalty Negates a TD** | **+10** | A started player's penalty (any type) wipes out a touchdown for their own team. Stacks on top of the taunting/pre-snap bonus. |
 | **Invalid Roster Spot** | **−15** | A started offensive skill player who played **< 15% of offensive snaps AND had zero touches** (a wasted lineup slot). See exemptions below. |

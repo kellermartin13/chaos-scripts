@@ -985,6 +985,20 @@ class TestFindPenalties:
         ])
         assert chaos.find_penalties(pbp, starters)["00-1"]["points"] == 15
 
+    def test_roughing_the_passer_worth_15(self, starters):
+        pbp = self._pbp([
+            {"penalty_type": "Roughing the Passer",
+             "penalty_player_id": "00-1"},
+        ])
+        assert chaos.find_penalties(pbp, starters)["00-1"]["points"] == 15
+
+    def test_unnecessary_roughness_worth_15(self, starters):
+        pbp = self._pbp([
+            {"penalty_type": "Unnecessary Roughness",
+             "penalty_player_id": "00-1"},
+        ])
+        assert chaos.find_penalties(pbp, starters)["00-1"]["points"] == 15
+
     def test_presnap_worth_5(self, starters):
         pbp = self._pbp([
             {"penalty_type": "False Start", "penalty_player_id": "00-1"},
