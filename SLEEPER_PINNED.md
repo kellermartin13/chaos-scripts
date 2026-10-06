@@ -29,8 +29,9 @@ Calculated from official NFL data every Wednesday:
   the opponent's 20: the one who committed it (QB's INT or the fumbler) **and**
   any started defender who caused it (interception, forced fumble, recovery).
 - **+20 Non-QB TD Pass** — a started non-QB (RB/WR/TE) throws a touchdown pass.
-- **+15 Taunting / Unsportsmanlike** — a started player is flagged for taunting
-  or unsportsmanlike conduct.
+- **+15 Taunting / Unsportsmanlike / Roughness** — a started player is flagged
+  for taunting, unsportsmanlike conduct, roughing the passer, or unnecessary
+  roughness.
 - **+5 Pre-Snap Penalty** — a started player's false start, delay of game, or
   illegal formation/shift/motion/offside.
 - **+10 Penalty Negates a TD** — a started player's penalty (any type) wipes out

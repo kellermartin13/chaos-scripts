@@ -50,10 +50,15 @@ REDZONE_YARDLINE = 20
 NON_QB_TD_PASS_POINTS = 20
 
 # Penalty chaos, keyed off nflverse penalty_type.
-TAUNTING_PENALTY_POINTS = 15
-TAUNTING_PENALTY_TYPES = {
+# +15 unsportsmanlike / personal-foul bucket: taunting, unsportsmanlike
+# conduct, and the "flagrant" roughness fouls (roughing the passer,
+# unnecessary roughness).
+UNSPORTSMANLIKE_PENALTY_POINTS = 15
+UNSPORTSMANLIKE_PENALTY_TYPES = {
     "Taunting",
     "Unsportsmanlike Conduct",
+    "Roughing the Passer",
+    "Unnecessary Roughness",
 }
 
 PRESNAP_PENALTY_POINTS = 5
@@ -980,7 +985,8 @@ def find_non_qb_td_passes(pbp, starters):
 def find_penalties(pbp, starters):
     """
     Penalty chaos for started players:
-      +15 taunting / unsportsmanlike conduct,
+      +15 taunting / unsportsmanlike conduct / roughing the passer /
+          unnecessary roughness,
       +5  pre-snap penalties (false start, delay of game, etc.),
       +10 extra (any penalty type) when the penalty nullifies a touchdown for
           the player's own team.
@@ -1011,8 +1017,8 @@ def find_penalties(pbp, starters):
 
         penalty_type = play.get("penalty_type")
 
-        if penalty_type in TAUNTING_PENALTY_TYPES:
-            base_points = TAUNTING_PENALTY_POINTS
+        if penalty_type in UNSPORTSMANLIKE_PENALTY_TYPES:
+            base_points = UNSPORTSMANLIKE_PENALTY_POINTS
         elif penalty_type in PRESNAP_PENALTY_TYPES:
             base_points = PRESNAP_PENALTY_POINTS
         else:
