@@ -5,6 +5,7 @@ import contextlib
 import html
 import io
 import os
+import re
 import sys
 import urllib.error
 from collections import defaultdict
@@ -100,6 +101,16 @@ ASSIST_TACKLE_COLUMNS = [
     "assist_tackle_3_player_id",
     "assist_tackle_4_player_id",
 ]
+
+# Matches the "F.Last" abbreviation of the player hurt on a play, e.g.
+# "K.Juszczyk was injured during the play" / "D.Hopkins is being carted off".
+# Used to tie the invalid-spot injury exemption to the player actually
+# injured, instead of anyone who merely shares a last name (e.g. exempting
+# Keenan Allen because Josh Allen appears in an unrelated injury play).
+INGAME_INJURY_RE = re.compile(
+    r"([A-Z][a-z]?\.[A-Za-z.'\-]+)\s+(?:was|is|been|being)\s+"
+    r"(?:\w+\s+){0,2}?(?:injured|carted)"
+)
 
 
 # =============================================================================
@@ -1127,8 +1138,15 @@ def compute_touches(pbp):
 def find_ingame_injuries(pbp, starters):
     """
     Best-effort detection of players hurt during their game: scan play
-    descriptions for injury language and match a started player's last name.
-    Used only to exempt them from the invalid-roster-spot penalty.
+    descriptions for injury language and match the player who was actually
+    injured by his "F.Last" abbreviation (as it appears in nflverse PBP, e.g.
+    "K.Allen"). Used only to exempt them from the invalid-roster-spot penalty.
+
+    Matching on the injured player's abbreviation — not a bare last-name
+    substring — avoids false exemptions when a different player shares a last
+    name (e.g. not exempting Keenan Allen just because Josh Allen is named in
+    an unrelated injury play). A player ruled out *before* kickoff is never
+    hurt in-game, so he won't match here and stays an invalid spot.
 
     Returns:
         gsis_id -> reason string
@@ -1144,24 +1162,35 @@ def find_ingame_injuries(pbp, starters):
         )
     )
 
+    # Precompute each starter's "F.Last" abbreviation so an injury is matched
+    # to the player actually hurt.
+    abbr_to_gsis = {}
+
+    for gsis_id, player in starters.items():
+        name = player.get("name") or ""
+        parts = name.split()
+
+        if len(parts) < 2:
+            continue
+
+        last_name = parts[-1]
+
+        if len(last_name) < 3:
+            continue
+
+        abbr = f"{parts[0][0]}.{last_name}".lower()
+
+        abbr_to_gsis.setdefault(abbr, gsis_id)
+
     injured = {}
 
     for _, play in pbp[mask].iterrows():
-        description = str(play.get("desc")).lower()
+        description = str(play.get("desc"))
 
-        for gsis_id, player in starters.items():
-            name = player.get("name") or ""
-            parts = name.split()
+        for match in INGAME_INJURY_RE.finditer(description):
+            gsis_id = abbr_to_gsis.get(match.group(1).lower())
 
-            if not parts:
-                continue
-
-            last_name = parts[-1].lower()
-
-            if len(last_name) < 3:
-                continue
-
-            if last_name in description:
+            if gsis_id:
                 injured.setdefault(
                     gsis_id,
                     "left game (injury noted in play-by-play)",

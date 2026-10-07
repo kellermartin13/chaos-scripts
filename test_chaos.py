@@ -1445,6 +1445,48 @@ class TestFindIngameInjuries:
         result = chaos.find_ingame_injuries(pbp, starters)
         assert result == {}
 
+    def test_carted_off_flagged(self, starters):
+        pbp = pd.DataFrame(
+            [{"desc": "5-B.Runner is being carted off the field."}]
+        )
+        result = chaos.find_ingame_injuries(pbp, starters)
+        assert "00-1" in result
+
+    def test_same_last_name_different_initial_not_flagged(self):
+        # Keenan Allen was ruled out pre-game; only Josh Allen is in the
+        # injury play. Matching by "F.Last" must not exempt K.Allen.
+        starters = {
+            "00-keenan": {
+                "name": "Keenan Allen",
+                "position": "WR",
+                "roster_id": 9,
+            },
+        }
+        pbp = pd.DataFrame([
+            {
+                "desc": (
+                    "(13:50) 17-J.Allen pass short left to 5-J.Palmer to "
+                    "NE 42 for 3 yards (22-C.Woods). NE-22-C.Woods was "
+                    "injured during the play."
+                )
+            }
+        ])
+        result = chaos.find_ingame_injuries(pbp, starters)
+        assert result == {}
+
+    def test_injured_teammate_shared_last_name_not_borrowed(self):
+        # The player actually injured (C.Woods) is exempt; a same-last-name
+        # starter with a different initial is not.
+        starters = {
+            "00-cw": {"name": "Caleb Woods", "position": "WR", "roster_id": 1},
+            "00-xw": {"name": "Xavier Woods", "position": "WR", "roster_id": 2},
+        }
+        pbp = pd.DataFrame(
+            [{"desc": "NE-22-C.Woods was injured during the play."}]
+        )
+        result = chaos.find_ingame_injuries(pbp, starters)
+        assert result == {"00-cw": "left game (injury noted in play-by-play)"}
+
 
 # ---------------------------------------------------------------------------
 # resolve_exempt_players
